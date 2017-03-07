@@ -8,9 +8,9 @@ import javax.annotation.Generated;
 @Generated("io.requery.processor.EntityProcessor")
 public class Models {
     public static final EntityModel VAULT = new EntityModelBuilder("vault")
-    .addType(VaultTxnNoteEntity.$TYPE)
-    .addType(VaultCashBalancesEntity.$TYPE)
     .addType(VaultStatesEntity.$TYPE)
+    .addType(VaultCashBalancesEntity.$TYPE)
+    .addType(VaultTxnNoteEntity.$TYPE)
     .build();
 
     private Models() {
