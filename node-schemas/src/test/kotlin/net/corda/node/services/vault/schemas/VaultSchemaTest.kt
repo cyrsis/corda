@@ -4,6 +4,7 @@ import io.requery.Persistable
 import io.requery.TransactionIsolation
 import io.requery.kotlin.eq
 import io.requery.kotlin.invoke
+import io.requery.query.RowExpression
 import io.requery.rx.KotlinRxEntityStore
 import io.requery.sql.*
 import io.requery.sql.platform.Generic
@@ -31,6 +32,7 @@ import rx.Observable
 import java.sql.Connection
 import java.sql.DriverManager
 import java.time.Instant
+import java.time.Instant.now
 import java.util.*
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -39,7 +41,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-class VaultSchemaTest {
+class   VaultSchemaTest {
 
     var instance : KotlinEntityDataStore<Persistable>? = null
     val data : KotlinEntityDataStore<Persistable> get() = instance!!
@@ -525,6 +527,98 @@ class VaultSchemaTest {
             var count = 0
             while (rs.next()) count++
             assertEquals(3, count)
+
+            // Use JDBC Prepared Statement
+            val selectWithCompositeKeys = """
+                    SELECT transaction_id, output_index, contract_state FROM VAULT_STATES
+                    WHERE ((transaction_id, output_index) IN (?,?)) AND (state_status = 0)
+            """
+            val preparedStatement = jdbcConn.prepareStatement(selectWithCompositeKeys)
+            preparedStatement.setString(1, refs.first().txhash.toString())
+            preparedStatement.setInt(2, refs.first().index)
+            preparedStatement.execute()
+            val prs = preparedStatement.resultSet
+            assertNotNull(prs.next())
+        }
+    }
+
+    @Test
+    fun testRequeryWithCompositeKey() {
+        // txn entity with 4 input states (SingleOwnerState x 3, MultiOwnerState x 1)
+        val txn = createTxnWithTwoStateTypes()
+        dummyStatesInsert(txn)
+
+        data.invoke {
+            // Use new Requery RowExpression support (add in 1.2.0)
+            // https://github.com/requery/requery/issues/434
+            val expressions = listOf(VaultStatesEntity.TX_ID, VaultStatesEntity.INDEX)
+            val expression = RowExpression.of(expressions)
+            val refs = txn.inputs.map { it.ref }
+            val argValues = listOf( listOf("'${refs[0].txhash}'", refs[0].index),
+                                    listOf("'${refs[1].txhash}'", refs[1].index) )
+            val result = select(VaultStatesEntity::class) where (expression.`in`(argValues))
+            assertEquals(2, result.get().count())
+        }
+    }
+
+    val updateSoftLockReserve = """
+                UPDATE VAULT_STATES SET lock_id = ?, lock_timestamp = '${now()}'
+            WHERE ((transaction_id, output_index) IN (?));
+            """
+
+    val updateSoftLockReleaseStateRefs = """
+                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${now()}'
+                    WHERE ((transaction_id, output_index) IN (?,?));
+                """
+
+    val updateSoftLockReleaseId = """
+                    UPDATE VAULT_STATES SET lock_id = null, lock_timestamp = '${now()}'
+                    WHERE (lock_id = ?);
+                """
+
+    val selectForUpdateStatement = """
+                    SELECT transaction_id, output_index, contract_state, notary_name, notary_key
+                    FROM vault_states
+                    WHERE (transaction_id, output_index) IN (?,?)
+                    FOR UPDATE
+                """
+    @Test
+    fun testRequeryRawPreparedStatements() {
+        // txn entity with 4 input states (SingleOwnerState x 3, MultiOwnerState x 1)
+        val txn = createTxnWithTwoStateTypes()
+        dummyStatesInsert(txn)
+
+        data.invoke {
+            val stateRefs = txn.inputs.map { it.ref }
+            val lockId = "LOCK#1"
+
+            // SoftLockReserve
+            try {
+                val result = raw(VaultStatesEntity::class, updateSoftLockReserve, lockId, stateRefs.first())
+                assertEquals(1, result.count())
+            }
+            catch (e: Exception) { println(e.printStackTrace()) }
+
+            // SoftLockRelease StateRefs
+            try {
+                val result = raw(VaultStatesEntity::class, updateSoftLockReleaseStateRefs, lockId)
+                assertEquals(1, result.count())
+            }
+            catch (e: Exception) { println(e.printStackTrace()) }
+
+            // SoftLockRelease LockId
+            try {
+                val result = raw(VaultStatesEntity::class, updateSoftLockReleaseId, lockId)
+                assertEquals(1, result.count())
+            }
+            catch (e: Exception) { println(e.printStackTrace()) }
+
+            // select for update
+            try {
+                val result = raw(VaultStatesEntity::class, selectForUpdateStatement, stateRefs)
+                assertEquals(4, result.count())
+            }
+            catch (e: Exception) { println(e.printStackTrace()) }
         }
     }
 }
