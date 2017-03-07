@@ -3,12 +3,12 @@ package net.corda.node.services.vault
 import io.requery.TransactionIsolation
 import io.requery.kotlin.`in`
 import io.requery.kotlin.eq
+import io.requery.query.RowExpression
 import net.corda.contracts.asset.Cash
 import net.corda.core.ThreadBox
 import net.corda.core.bufferUntilSubscribed
 import net.corda.core.contracts.*
 import net.corda.core.crypto.AbstractParty
-import net.corda.core.crypto.AnonymousParty
 import net.corda.core.crypto.CompositeKey
 import net.corda.core.crypto.SecureHash
 import net.corda.core.node.ServiceHub
@@ -341,19 +341,18 @@ class NodeVaultService(private val services: ServiceHub, dataSourceProperties: P
         // Retrieve all unconsumed states for this transaction's inputs
         val consumedStates = HashSet<StateAndRef<ContractState>>()
         if (tx.inputs.isNotEmpty()) {
-            val stateRefs = tx.inputs.fold("") { stateRefs, it -> stateRefs + "('${it.txhash}','${it.index}')," }.dropLast(1)
-            // TODO: using native JDBC until requery supports SELECT WHERE COMPOSITE_KEY IN
-            // https://github.com/requery/requery/issues/434
-            val statement = configuration.jdbcSession().createStatement()
-            val rs = statement.executeQuery("SELECT transaction_id, output_index, contract_state " +
-                    "FROM vault_states " +
-                    "WHERE ((transaction_id, output_index) IN ($stateRefs)) " +
-                    "AND (state_status = 0)")
-            while (rs.next()) {
-                val txHash = SecureHash.parse(rs.getString(1))
-                val index = rs.getInt(2)
-                val state = rs.getBytes(3).deserialize<TransactionState<ContractState>>(createKryo())
-                consumedStates.add(StateAndRef(state, StateRef(txHash, index)))
+            session.withTransaction(TransactionIsolation.REPEATABLE_READ) {
+                val expressions = listOf(VaultStatesEntity.TX_ID, VaultStatesEntity.INDEX)
+                val expression = RowExpression.of(expressions)
+                val stateRefs = tx.inputs.map { listOf( "'${it.txhash}'", it.index) }
+                log.trace("SELECT .. WHERE IN $stateRefs")
+                val result = select(VaultStatesEntity::class) where (expression.`in`(stateRefs))
+                result.get().forEach {
+                    val txHash = SecureHash.parse(it.txId)
+                    val index = it.index
+                    val state = it.contractState.deserialize<TransactionState<ContractState>>(createKryo())
+                    consumedStates.add(StateAndRef(state, StateRef(txHash, index)))
+                }
             }
         }
 
