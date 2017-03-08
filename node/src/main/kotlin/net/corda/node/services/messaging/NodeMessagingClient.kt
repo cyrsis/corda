@@ -7,16 +7,26 @@ import net.corda.core.crypto.CompositeKey
 import net.corda.core.messaging.*
 import net.corda.core.node.NodeVersionInfo
 import net.corda.core.node.services.PartyInfo
+import net.corda.core.node.services.TransactionVerifierService
+import net.corda.core.random63BitValue
 import net.corda.core.serialization.SerializedBytes
 import net.corda.core.serialization.opaque
 import net.corda.core.success
+import net.corda.core.transactions.LedgerTransaction
 import net.corda.core.utilities.loggerFor
 import net.corda.core.utilities.trace
+import net.corda.node.ArtemisTcpTransport
+import net.corda.node.ConnectionDirection
+import net.corda.node.VerifierApi
+import net.corda.node.VerifierApi.Companion.VERIFICATION_REQUESTS_QUEUE_NAME
+import net.corda.node.VerifierApi.Companion.VERIFICATION_RESPONSES_QUEUE_NAME_PREFIX
 import net.corda.node.services.RPCUserService
 import net.corda.node.services.api.MessagingServiceInternal
 import net.corda.node.services.config.NodeConfiguration
-import net.corda.node.services.messaging.ArtemisMessagingComponent.ConnectionDirection.Outbound
+import net.corda.node.services.config.VerifierType
 import net.corda.node.services.statemachine.StateMachineManager
+import net.corda.node.services.transactions.InMemoryTransactionVerifierService
+import net.corda.node.services.transactions.OutOfProcessTransactionVerifierService
 import net.corda.node.utilities.*
 import org.apache.activemq.artemis.api.core.ActiveMQObjectClosedException
 import org.apache.activemq.artemis.api.core.Message.*
@@ -31,6 +41,7 @@ import java.time.Instant
 import java.util.*
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.annotation.concurrent.ThreadSafe
 
 // TODO: Stop the wallet explorer and other clients from using this class and get rid of persistentInbox
@@ -73,6 +84,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
         private val nodeVersionProperty = SimpleString("node-version")
         private val nodeVendorProperty = SimpleString("node-vendor")
         private val amqDelay: Int = Integer.valueOf(System.getProperty("amq.delivery.delay.ms", "0"))
+        private val verifierResponseAddress = SimpleString("$VERIFICATION_RESPONSES_QUEUE_NAME_PREFIX.${random63BitValue()}")
     }
 
     private class InnerState {
@@ -86,6 +98,11 @@ class NodeMessagingClient(override val config: NodeConfiguration,
         // Consumer for inbound client RPC messages.
         var rpcConsumer: ClientConsumer? = null
         var rpcNotificationConsumer: ClientConsumer? = null
+        var verificationResponseConsumer: ClientConsumer? = null
+    }
+    val verifierService = when (config.verifierType) {
+        VerifierType.InMemory -> InMemoryTransactionVerifierService(numberOfWorkers = 4)
+        VerifierType.OutOfProcess -> createOutOfProcessVerifierService()
     }
 
     /** A registration to handle messages of different types */
@@ -129,7 +146,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
 
             log.info("Connecting to server: $serverHostPort")
             // TODO Add broker CN to config for host verification in case the embedded broker isn't used
-            val tcpTransport = tcpTransport(Outbound(), serverHostPort.hostText, serverHostPort.port)
+            val tcpTransport = ArtemisTcpTransport.tcpTransport(ConnectionDirection.Outbound(), serverHostPort, config)
             val locator = ActiveMQClient.createServerLocatorWithoutHA(tcpTransport)
             clientFactory = locator.createSessionFactory()
 
@@ -161,6 +178,18 @@ class NodeMessagingClient(override val config: NodeConfiguration,
             rpcConsumer = session.createConsumer(RPC_REQUESTS_QUEUE)
             rpcNotificationConsumer = session.createConsumer(RPC_QUEUE_REMOVALS_QUEUE)
             rpcDispatcher = createRPCDispatcher(rpcOps, userService, config.myLegalName)
+
+            fun checkVerifierCount() {
+                if (session.queueQuery(SimpleString(VERIFICATION_REQUESTS_QUEUE_NAME)).consumerCount == 0) {
+                    log.warn("No connected verifier listening on $VERIFICATION_REQUESTS_QUEUE_NAME!")
+                }
+            }
+            if (config.verifierType == VerifierType.OutOfProcess) {
+                session.createQueue(VerifierApi.VERIFICATION_REQUESTS_QUEUE_NAME, VerifierApi.VERIFICATION_REQUESTS_QUEUE_NAME)
+                session.createQueue(verifierResponseAddress, verifierResponseAddress)
+                verificationResponseConsumer = session.createConsumer(verifierResponseAddress)
+                messagingExecutor.scheduleAtFixedRate(::checkVerifierCount, 0, 10, TimeUnit.SECONDS)
+            }
         }
     }
 
@@ -222,6 +251,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
             check(!running) { "run can't be called twice" }
             running = true
             rpcDispatcher!!.start(rpcConsumer!!, rpcNotificationConsumer!!, nodeExecutor)
+            (verifierService as? OutOfProcessTransactionVerifierService)?.start(verificationResponseConsumer!!)
             p2pConsumer!!
         }
 
@@ -460,6 +490,23 @@ class NodeMessagingClient(override val config: NodeConfiguration,
                     }
                 }
             }
+
+    private fun createOutOfProcessVerifierService(): TransactionVerifierService {
+        return object : OutOfProcessTransactionVerifierService() {
+                override fun sendRequest(nonce: Long, transaction: LedgerTransaction) {
+                    messagingExecutor.fetchFrom {
+                        state.locked {
+                            val message = session!!.createMessage(false)
+                            val request = VerifierApi.VerificationRequest(nonce, transaction, verifierResponseAddress)
+                            request.writeToClientMessage(message)
+                            producer!!.send(VERIFICATION_REQUESTS_QUEUE_NAME, message)
+                        }
+                    }
+                }
+
+            }
+        }
+
 
     override fun getAddressOfParty(partyInfo: PartyInfo): MessageRecipients {
         return when (partyInfo) {

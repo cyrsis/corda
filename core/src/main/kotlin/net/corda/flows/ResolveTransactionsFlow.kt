@@ -107,7 +107,9 @@ class ResolveTransactionsFlow(private val txHashes: Set<SecureHash>,
         for (stx in newTxns) {
             // Resolve to a LedgerTransaction and then run all contracts.
             val ltx = stx.toLedgerTransaction(serviceHub)
-            ltx.verify()
+            // Block on each verification request.
+            // TODO We could recover some parallelism from the dependency graph.
+            serviceHub.transactionVerifierService.verify(ltx).get()
             serviceHub.recordTransactions(stx)
             result += ltx
         }

@@ -1,10 +1,11 @@
 package net.corda.testing.messaging
 
 import com.google.common.net.HostAndPort
-import net.corda.node.services.config.SSLConfiguration
+import net.corda.config.SSLConfiguration
+import net.corda.node.ArtemisTcpTransport
+import net.corda.node.ConnectionDirection
 import net.corda.node.services.config.configureTestSSL
 import net.corda.node.services.messaging.ArtemisMessagingComponent
-import net.corda.node.services.messaging.ArtemisMessagingComponent.ConnectionDirection.Outbound
 import org.apache.activemq.artemis.api.core.client.*
 
 /**
@@ -17,7 +18,7 @@ class SimpleMQClient(val target: HostAndPort,
     lateinit var producer: ClientProducer
 
     fun start(username: String? = null, password: String? = null) {
-        val tcpTransport = tcpTransport(Outbound(), target.hostText, target.port)
+        val tcpTransport = ArtemisTcpTransport.tcpTransport(ConnectionDirection.Outbound(), target, config)
         val locator = ActiveMQClient.createServerLocatorWithoutHA(tcpTransport).apply {
             isBlockOnNonDurableSend = true
             threadPoolMaxSize = 1

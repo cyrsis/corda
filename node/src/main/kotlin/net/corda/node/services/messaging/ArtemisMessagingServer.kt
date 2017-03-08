@@ -16,23 +16,23 @@ import net.corda.core.node.services.NetworkMapCache.MapChange
 import net.corda.core.seconds
 import net.corda.core.utilities.debug
 import net.corda.core.utilities.loggerFor
-import net.corda.node.printBasicNodeInfo
+import net.corda.node.*
 import net.corda.node.services.RPCUserService
 import net.corda.node.services.config.NodeConfiguration
 import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.CLIENTS_PREFIX
 import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.NODE_USER
 import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.PEER_USER
-import net.corda.node.services.messaging.ArtemisMessagingComponent.ConnectionDirection.Inbound
-import net.corda.node.services.messaging.ArtemisMessagingComponent.ConnectionDirection.Outbound
 import net.corda.node.services.messaging.NodeLoginModule.Companion.NODE_ROLE
 import net.corda.node.services.messaging.NodeLoginModule.Companion.PEER_ROLE
 import net.corda.node.services.messaging.NodeLoginModule.Companion.RPC_ROLE
+import net.corda.node.services.messaging.NodeLoginModule.Companion.VERIFIER_ROLE
 import org.apache.activemq.artemis.api.core.SimpleString
 import org.apache.activemq.artemis.core.config.BridgeConfiguration
 import org.apache.activemq.artemis.core.config.Configuration
 import org.apache.activemq.artemis.core.config.CoreQueueConfiguration
 import org.apache.activemq.artemis.core.config.impl.ConfigurationImpl
 import org.apache.activemq.artemis.core.config.impl.SecurityConfiguration
+import org.apache.activemq.artemis.core.remoting.impl.netty.NettyAcceptorFactory
 import org.apache.activemq.artemis.core.remoting.impl.netty.NettyConnection
 import org.apache.activemq.artemis.core.remoting.impl.netty.NettyConnector
 import org.apache.activemq.artemis.core.remoting.impl.netty.NettyConnectorFactory
@@ -48,8 +48,8 @@ import org.bouncycastle.asn1.x500.X500Name
 import rx.Subscription
 import java.io.IOException
 import java.math.BigInteger
+import java.security.KeyStore
 import java.security.Principal
-import java.security.PublicKey
 import java.util.*
 import java.util.concurrent.Executor
 import java.util.concurrent.ScheduledExecutorService
@@ -64,6 +64,7 @@ import javax.security.auth.login.AppConfigurationEntry.LoginModuleControlFlag.RE
 import javax.security.auth.login.FailedLoginException
 import javax.security.auth.login.LoginException
 import javax.security.auth.spi.LoginModule
+import javax.security.cert.CertificateException
 import javax.security.cert.X509Certificate
 
 // TODO: Verify that nobody can connect to us and fiddle with our config over the socket due to the secman.
@@ -147,7 +148,7 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
         bindingsDirectory = (artemisDir / "bindings").toString()
         journalDirectory = (artemisDir / "journal").toString()
         largeMessagesDirectory = (artemisDir / "large-messages").toString()
-        acceptorConfigurations = setOf(tcpTransport(Inbound, "0.0.0.0", myHostPort.port))
+        acceptorConfigurations = setOf(verifyingTcpTransport(ConnectionDirection.Inbound, "0.0.0.0", myHostPort.port))
         // Enable built in message deduplication. Note we still have to do our own as the delayed commits
         // and our own definition of commit mean that the built in deduplication cannot remove all duplicates.
         idCacheSize = 2000 // Artemis Default duplicate cache size i.e. a guess
@@ -183,10 +184,11 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
     }
 
     /**
-     * Authenticated clients connecting to us fall in one of three groups:
+     * Authenticated clients connecting to us fall in one of the following groups:
      * 1. The node hosting us and any of its logically connected components. These are given full access to all valid queues.
      * 2. Peers on the same network as us. These are only given permission to send to our P2P inbound queue.
      * 3. RPC users. These are only given sufficient access to perform RPC with us.
+     * 4. Verifiers. These are given read access to the verification request queue and write access to the response queue.
      */
     private fun ConfigurationImpl.configureAddressSecurity() {
         val nodeInternalRole = Role(NODE_ROLE, true, true, true, true, true, true, true, true)
@@ -200,6 +202,8 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
                     nodeInternalRole,
                     restrictedRole("$CLIENTS_PREFIX$username", consume = true, createNonDurableQueue = true, deleteNonDurableQueue = true))
         }
+        securityRoles[VerifierApi.VERIFICATION_REQUESTS_QUEUE_NAME] = setOf(nodeInternalRole, restrictedRole(VERIFIER_ROLE, consume = true))
+        securityRoles["${VerifierApi.VERIFICATION_RESPONSES_QUEUE_NAME_PREFIX}.*"] = setOf(nodeInternalRole, restrictedRole(VERIFIER_ROLE, send = true))
     }
 
     private fun restrictedRole(name: String, send: Boolean = false, consume: Boolean = false, createDurableQueue: Boolean = false,
@@ -210,9 +214,6 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
     }
 
     private fun createArtemisSecurityManager(): ActiveMQJAASSecurityManager {
-        val rootCAPublicKey = X509Utilities
-                .loadCertificateFromKeyStore(config.trustStoreFile, config.trustStorePassword, CORDA_ROOT_CA)
-                .publicKey
         val ourCertificate = X509Utilities
                 .loadCertificateFromKeyStore(config.keyStoreFile, config.keyStorePassword, CORDA_CLIENT_CA)
         val ourSubjectDN = X500Name(ourCertificate.subjectDN.name)
@@ -220,13 +221,22 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
         require(ourSubjectDN.commonName == config.myLegalName) {
             "Legal name does not match with our subject CN: $ourSubjectDN"
         }
+        val defaultCertPolicies = mapOf(
+                PEER_ROLE to CertificateChainCheckPolicy.RootMustMatch,
+                NODE_ROLE to CertificateChainCheckPolicy.LeafMustMatch,
+                VERIFIER_ROLE to CertificateChainCheckPolicy.RootMustMatch
+        )
+        val keyStore = X509Utilities.loadKeyStore(config.keyStoreFile, config.keyStorePassword)
+        val trustStore = X509Utilities.loadKeyStore(config.trustStoreFile, config.trustStorePassword)
+        val certChecks = defaultCertPolicies.mapValues {
+            (config.certificateChainCheckPolicies[it.key] ?: it.value).createCheck(keyStore, trustStore)
+        }
         val securityConfig = object : SecurityConfiguration() {
             // Override to make it work with our login module
             override fun getAppConfigurationEntry(name: String): Array<AppConfigurationEntry> {
                 val options = mapOf(
                         RPCUserService::class.java.name to userService,
-                        CORDA_ROOT_CA to rootCAPublicKey,
-                        CORDA_CLIENT_CA to ourCertificate.publicKey)
+                        NodeLoginModule.CERT_CHAIN_CHECKS_OPTION_NAME to certChecks)
                 return arrayOf(AppConfigurationEntry(name, REQUIRED, options))
             }
         }
@@ -319,6 +329,12 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
         deployBridge(address.queueName, address.hostAndPort, legalName)
     }
 
+    private fun verifyingTcpTransport(direction: ConnectionDirection, host: String, port: Int, enableSSL: Boolean = true) =
+            ArtemisTcpTransport.tcpTransport(direction, HostAndPort.fromParts(host, port), config,
+                    enableSSL = enableSSL,
+                    connectorFactoryClassName = VerifyingNettyConnectorFactory::class.java.name
+            )
+
     /**
      * All nodes are expected to have a public facing address called [ArtemisMessagingComponent.P2P_QUEUE] for receiving
      * messages from other nodes. When we want to send a message to a node we send it to our internal address/queue for it,
@@ -326,7 +342,7 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
      * P2P address.
      */
     private fun deployBridge(queueName: String, target: HostAndPort, legalName: String) {
-        val tcpTransport = tcpTransport(Outbound(expectedCommonName = legalName), target.hostText, target.port)
+        val tcpTransport = verifyingTcpTransport(ConnectionDirection.Outbound(expectedCommonName = legalName), target.hostText, target.port)
         tcpTransport.params[ArtemisMessagingServer::class.java.name] = this
         // We intentionally overwrite any previous connector config in case the peer legal name changed
         activeMQServer.configuration.addConnectorConfiguration(target.toString(), tcpTransport)
@@ -400,7 +416,7 @@ private class VerifyingNettyConnector(configuration: MutableMap<String, Any>?,
         NettyConnector(configuration, handler, listener, closeExecutor, threadPool, scheduledThreadPool, protocolManager)
 {
     private val server = configuration?.get(ArtemisMessagingServer::class.java.name) as? ArtemisMessagingServer
-    private val expectedCommonName = configuration?.get(ArtemisMessagingComponent.VERIFY_PEER_COMMON_NAME) as? String
+    private val expectedCommonName = configuration?.get(ArtemisTcpTransport.VERIFY_PEER_COMMON_NAME) as? String
 
     override fun createConnection(): Connection? {
         val connection = super.createConnection() as NettyConnection?
@@ -428,6 +444,70 @@ private class VerifyingNettyConnector(configuration: MutableMap<String, Any>?,
     }
 }
 
+sealed class CertificateChainCheckPolicy {
+
+    @FunctionalInterface
+    interface Check {
+        fun checkCertificateChain(theirChain: Array<X509Certificate>)
+    }
+
+    /**
+     * Check the public key [publicKey] against the passed in certificate chain [certificates]
+     * @throws CertificateException
+     */
+    abstract fun createCheck(keyStore: KeyStore, trustStore: KeyStore): Check
+
+    object Any : CertificateChainCheckPolicy() {
+        override fun createCheck(keyStore: KeyStore, trustStore: KeyStore): Check {
+            return object : Check {
+                override fun checkCertificateChain(theirChain: Array<X509Certificate>) {
+                }
+            }
+        }
+    }
+
+    object RootMustMatch : CertificateChainCheckPolicy() {
+        override fun createCheck(keyStore: KeyStore, trustStore: KeyStore): Check {
+            val rootPublicKey = trustStore.getCertificate(CORDA_ROOT_CA).publicKey
+            return object : Check {
+                override fun checkCertificateChain(theirChain: Array<X509Certificate>) {
+                    val theirRoot = theirChain.last().publicKey
+                    if (rootPublicKey != theirRoot) {
+                        throw CertificateException("Root certificate mismatch, their root = $theirRoot")
+                    }
+                }
+            }
+        }
+    }
+
+    object LeafMustMatch : CertificateChainCheckPolicy() {
+        override fun createCheck(keyStore: KeyStore, trustStore: KeyStore): Check {
+            val ourPublicKey = keyStore.getCertificate(CORDA_CLIENT_CA).publicKey
+            return object : Check {
+                override fun checkCertificateChain(theirChain: Array<X509Certificate>) {
+                    val theirLeaf = theirChain.first().publicKey
+                    if (ourPublicKey != theirLeaf) {
+                        throw CertificateException("Leaf certificate mismatch, their leaf = $theirLeaf")
+                    }
+                }
+            }
+        }
+    }
+
+    class MustContainOneOf(val trustedAliases: Set<String>) : CertificateChainCheckPolicy() {
+        override fun createCheck(keyStore: KeyStore, trustStore: KeyStore): Check {
+            val trustedPublicKeys = trustedAliases.map { trustStore.getCertificate(it).publicKey }.toSet()
+            return object : Check {
+                override fun checkCertificateChain(theirChain: Array<X509Certificate>) {
+                    if (!theirChain.any { it.publicKey in trustedPublicKeys }) {
+                        throw CertificateException("Their certificate chain contained none of the trusted ones")
+                    }
+                }
+            }
+        }
+    }
+}
+
 /**
  * Clients must connect to us with a username and password and must use TLS. If a someone connects with
  * [ArtemisMessagingComponent.NODE_USER] then we confirm it's just us as the node by checking their TLS certificate
@@ -445,6 +525,9 @@ class NodeLoginModule : LoginModule {
         const val PEER_ROLE = "SystemRoles/Peer"
         const val NODE_ROLE = "SystemRoles/Node"
         const val RPC_ROLE = "SystemRoles/RPC"
+        const val VERIFIER_ROLE = "SystemRoles/Verifier"
+
+        const val CERT_CHAIN_CHECKS_OPTION_NAME = "CertChainChecks"
 
         val log = loggerFor<NodeLoginModule>()
     }
@@ -453,65 +536,74 @@ class NodeLoginModule : LoginModule {
     private lateinit var subject: Subject
     private lateinit var callbackHandler: CallbackHandler
     private lateinit var userService: RPCUserService
-    private lateinit var ourRootCAPublicKey: PublicKey
-    private lateinit var ourPublicKey: PublicKey
+    private lateinit var peerCertCheck: CertificateChainCheckPolicy.Check
+    private lateinit var nodeCertCheck: CertificateChainCheckPolicy.Check
+    private lateinit var verifierCertCheck: CertificateChainCheckPolicy.Check
     private val principals = ArrayList<Principal>()
 
+    @Suppress("UNCHECKED_CAST")
     override fun initialize(subject: Subject, callbackHandler: CallbackHandler, sharedState: Map<String, *>, options: Map<String, *>) {
         this.subject = subject
         this.callbackHandler = callbackHandler
         userService = options[RPCUserService::class.java.name] as RPCUserService
-        ourRootCAPublicKey = options[CORDA_ROOT_CA] as PublicKey
-        ourPublicKey = options[CORDA_CLIENT_CA] as PublicKey
+        val certChainChecks = options[CERT_CHAIN_CHECKS_OPTION_NAME] as Map<String, CertificateChainCheckPolicy.Check>
+        peerCertCheck = certChainChecks[PEER_ROLE]!!
+        nodeCertCheck = certChainChecks[NODE_ROLE]!!
+        verifierCertCheck = certChainChecks[VERIFIER_ROLE]!!
     }
 
     override fun login(): Boolean {
-        val nameCallback = NameCallback("Username: ")
-        val passwordCallback = PasswordCallback("Password: ", false)
-        val certificateCallback = CertificateCallback()
-
         try {
-            callbackHandler.handle(arrayOf(nameCallback, passwordCallback, certificateCallback))
-        } catch (e: IOException) {
-            throw LoginException(e.message)
-        } catch (e: UnsupportedCallbackException) {
-            throw LoginException("${e.message} not available to obtain information from user")
-        }
+            val nameCallback = NameCallback("Username: ")
+            val passwordCallback = PasswordCallback("Password: ", false)
+            val certificateCallback = CertificateCallback()
 
-        val username = nameCallback.name ?: throw FailedLoginException("Username not provided")
-        val password = String(passwordCallback.password ?: throw FailedLoginException("Password not provided"))
+            try {
+                callbackHandler.handle(arrayOf(nameCallback, passwordCallback, certificateCallback))
+            } catch (e: IOException) {
+                throw LoginException(e.message)
+            } catch (e: UnsupportedCallbackException) {
+                throw LoginException("${e.message} not available to obtain information from user")
+            }
 
-        log.info("Processing login for $username")
+            val username = nameCallback.name ?: throw FailedLoginException("Username not provided")
+            val password = String(passwordCallback.password ?: throw FailedLoginException("Password not provided"))
 
-        val validatedUser = if (username == PEER_USER || username == NODE_USER) {
+            log.info("Processing login for $username")
             val certificates = certificateCallback.certificates ?: throw FailedLoginException("No TLS?")
-            authenticateNode(certificates, username)
-        } else {
-            // Otherwise assume they're an RPC user
-            authenticateRpcUser(password, username)
-        }
-        principals += UserPrincipal(validatedUser)
+            val validatedUser = when (determineUserRole(certificates, username)) {
+                PEER_ROLE -> authenticatePeer(certificates)
+                NODE_ROLE -> authenticateNode(certificates)
+                VERIFIER_ROLE -> authenticateVerifier(certificates)
+                RPC_ROLE -> authenticateRpcUser(password, username)
+                else -> throw FailedLoginException("Peer does not belong on our network")
+            }
+            principals += UserPrincipal(validatedUser)
 
-        loginSucceeded = true
-        return loginSucceeded
+            loginSucceeded = true
+            return loginSucceeded
+        } catch (exception: FailedLoginException) {
+            log.warn("$exception")
+            return false
+        }
     }
 
-    private fun authenticateNode(certificates: Array<X509Certificate>, username: String): String {
-        val peerCertificate = certificates.first()
-        val role = if (username == NODE_USER) {
-            if (peerCertificate.publicKey != ourPublicKey) {
-                throw FailedLoginException("Only the node can login as $NODE_USER")
-            }
-            NODE_ROLE
-        } else {
-            val theirRootCAPublicKey = certificates.last().publicKey
-            if (theirRootCAPublicKey != ourRootCAPublicKey) {
-                throw FailedLoginException("Peer does not belong on our network. Their root CA: $theirRootCAPublicKey")
-            }
-            PEER_ROLE  // This enables the peer to send to our P2P address
-        }
-        principals += RolePrincipal(role)
-        return peerCertificate.subjectDN.name
+    private fun authenticateNode(certificates: Array<X509Certificate>): String {
+        nodeCertCheck.checkCertificateChain(certificates)
+        principals += RolePrincipal(NODE_ROLE)
+        return certificates.first().subjectDN.name
+    }
+
+    private fun authenticateVerifier(certificates: Array<X509Certificate>): String {
+        verifierCertCheck.checkCertificateChain(certificates)
+        principals += RolePrincipal(VERIFIER_ROLE)
+        return certificates.first().subjectDN.name
+    }
+
+    private fun authenticatePeer(certificates: Array<X509Certificate>): String {
+        peerCertCheck.checkCertificateChain(certificates)
+        principals += RolePrincipal(PEER_ROLE)
+        return certificates.first().subjectDN.name
     }
 
     private fun authenticateRpcUser(password: String, username: String): String {
@@ -524,6 +616,25 @@ class NodeLoginModule : LoginModule {
         principals += RolePrincipal(RPC_ROLE)  // This enables the RPC client to send requests
         principals += RolePrincipal("$CLIENTS_PREFIX$username")  // This enables the RPC client to receive responses
         return username
+    }
+
+    private fun determineUserRole(certificates: Array<X509Certificate>?, username: String): String? {
+        fun requireTls() = require(certificates != null) { "No TLS?" }
+        return when (username) {
+            PEER_USER -> {
+                requireTls()
+                PEER_ROLE
+            }
+            NODE_USER -> {
+                requireTls()
+                NODE_ROLE
+            }
+            VerifierApi.VERIFIER_USERNAME -> {
+                requireTls()
+                VERIFIER_ROLE
+            }
+            else -> RPC_ROLE
+        }
     }
 
     override fun commit(): Boolean {

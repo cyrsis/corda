@@ -22,6 +22,7 @@ import net.corda.testing.node.MockStorageService
 import java.time.Clock
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.reflect.KClass
+import net.corda.node.services.transactions.InMemoryTransactionVerifierService
 
 open class MockServiceHubInternal(
         val customVault: VaultService? = null,
@@ -33,8 +34,11 @@ open class MockServiceHubInternal(
         val scheduler: SchedulerService? = null,
         val overrideClock: Clock? = NodeClock(),
         val flowFactory: FlowLogicRefFactory? = FlowLogicRefFactory(),
-        val schemas: SchemaService? = NodeSchemaService()
+        val schemas: SchemaService? = NodeSchemaService(),
+        val customTransactionVerifierService: TransactionVerifierService? = InMemoryTransactionVerifierService(2)
 ) : ServiceHubInternal() {
+    override val transactionVerifierService: TransactionVerifierService
+        get() = customTransactionVerifierService ?: throw UnsupportedOperationException()
     override val vaultService: VaultService
         get() = customVault ?: throw UnsupportedOperationException()
     override val keyManagementService: KeyManagementService

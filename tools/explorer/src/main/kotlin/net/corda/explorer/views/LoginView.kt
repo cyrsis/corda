@@ -8,9 +8,9 @@ import javafx.scene.control.*
 import net.corda.client.fxutils.map
 import net.corda.client.model.NodeMonitorModel
 import net.corda.client.model.objectProperty
+import net.corda.config.SSLConfiguration
 import net.corda.core.exists
 import net.corda.explorer.model.SettingsModel
-import net.corda.node.services.config.SSLConfiguration
 import net.corda.node.services.config.configureTestSSL
 import org.controlsfx.dialog.ExceptionDialog
 import tornadofx.*

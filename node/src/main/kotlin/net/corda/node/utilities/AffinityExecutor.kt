@@ -1,5 +1,6 @@
 package net.corda.node.utilities
 
+import com.google.common.util.concurrent.ListeningScheduledExecutorService
 import com.google.common.util.concurrent.SettableFuture
 import com.google.common.util.concurrent.Uninterruptibles
 import net.corda.core.utilities.loggerFor
@@ -51,7 +52,7 @@ interface AffinityExecutor : Executor {
      * tasks in the future and verify code is running on the executor.
      */
     open class ServiceAffinityExecutor(threadName: String, numThreads: Int) : AffinityExecutor,
-            ThreadPoolExecutor(numThreads, numThreads, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue<Runnable>()) {
+            ScheduledThreadPoolExecutor(numThreads) {
         companion object {
             val logger = loggerFor<ServiceAffinityExecutor>()
         }

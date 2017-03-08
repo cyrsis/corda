@@ -20,6 +20,8 @@ import net.corda.core.utilities.DUMMY_NOTARY_KEY
 import net.corda.node.internal.AbstractNode
 import net.corda.node.internal.NetworkMapInfo
 import net.corda.node.services.config.NodeConfiguration
+import net.corda.node.services.config.VerifierType
+import net.corda.node.services.messaging.CertificateChainCheckPolicy
 import net.corda.node.services.statemachine.FlowStateMachineImpl
 import net.corda.node.utilities.AddOrRemove.ADD
 import net.corda.testing.node.MockIdentityService
@@ -163,6 +165,9 @@ data class TestNodeConfiguration(
         override val emailAddress: String = "",
         override val exportJMXto: String = "",
         override val devMode: Boolean = true,
-        override val certificateSigningService: URL = URL("http://localhost")) : NodeConfiguration
+        override val certificateSigningService: URL = URL("http://localhost"),
+        override val certificateChainCheckPolicies: Map<String, CertificateChainCheckPolicy> = emptyMap(),
+        override val verifierType: VerifierType = VerifierType.InMemory) : NodeConfiguration {
+}
 
 fun Config.getHostAndPort(name: String) = HostAndPort.fromString(getString(name))

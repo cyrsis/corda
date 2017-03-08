@@ -11,7 +11,7 @@ import net.corda.core.messaging.CordaRPCOps
 import net.corda.core.messaging.startFlow
 import net.corda.core.utilities.Emoji
 import net.corda.flows.FinalityFlow
-import net.corda.node.services.config.SSLConfiguration
+import net.corda.config.SSLConfiguration
 import net.corda.node.services.messaging.CordaRPCClient
 import net.corda.testing.ALICE_KEY
 import java.nio.file.Path
