@@ -1,0 +1,96 @@
+apply plugin: 'kotlin'
+apply plugin: 'net.corda.plugins.quasar-utils'
+apply plugin: 'net.corda.plugins.publish-utils'
+
+description 'Corda core'
+
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+}
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+    jcenter()
+    maven {
+        url 'http://oss.sonatype.org/content/repositories/snapshots'
+    }
+    maven {
+        url 'https://dl.bintray.com/kotlin/exposed'
+    }
+}
+
+//noinspection GroovyAssignabilityCheck
+configurations {
+    integrationTestCompile.extendsFrom testCompile
+    integrationTestRuntime.extendsFrom testRuntime
+}
+
+sourceSets {
+    integrationTest {
+        kotlin {
+            compileClasspath += main.output + test.output
+            runtimeClasspath += main.output + test.output
+            srcDir file('src/integration-test/kotlin')
+        }
+    }
+    test {
+        resources {
+            srcDir "../config/test"
+        }
+    }
+    main {
+        resources {
+            srcDir "../config/dev"
+        }
+    }
+}
+
+dependencies {
+    compile project(":core")
+    compile project(":node-api")
+    integrationTestCompile project(":test-utils")
+    integrationTestCompile project(":client")
+
+    testCompile "junit:junit:$junit_version"
+
+    // Guava: Google test library (collections test suite)
+    testCompile "com.google.guava:guava-testlib:$guava_version"
+
+    // Bring in the MockNode infrastructure for writing protocol unit tests.
+    testCompile project(":node")
+    testCompile project(":test-utils")
+
+    compile "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+    compile "org.jetbrains.kotlin:kotlin-reflect:$kotlin_version"
+    compile "org.jetbrains.kotlinx:kotlinx-support-jdk8:0.3"
+    compile "org.jetbrains.kotlin:kotlin-test:$kotlin_version"
+    compile "org.apache.activemq:artemis-server:${artemis_version}"
+    compile "org.apache.activemq:artemis-core-client:${artemis_version}"
+    runtime "org.apache.activemq:artemis-amqp-protocol:${artemis_version}"
+
+    // Log4J: logging framework (with SLF4J bindings)
+    compile "org.apache.logging.log4j:log4j-slf4j-impl:${log4j_version}"
+    compile "org.apache.logging.log4j:log4j-core:${log4j_version}"
+
+    // AssertJ: for fluent assertions for testing
+    testCompile "org.assertj:assertj-core:${assertj_version}"
+
+    // Guava: Google utilities library.
+    compile "com.google.guava:guava:$guava_version"
+
+    // RxJava: observable streams of events.
+    compile "io.reactivex:rxjava:1.2.4"
+
+    // Bouncy castle support needed for X509 certificate manipulation
+    compile "org.bouncycastle:bcprov-jdk15on:${bouncycastle_version}"
+    compile "org.bouncycastle:bcpkix-jdk15on:${bouncycastle_version}"
+
+    // RS API: Response type and codes for ApiUtils.
+    compile "javax.ws.rs:javax.ws.rs-api:2.0"
+
+    // Integration test helpers
+    integrationTestCompile "junit:junit:$junit_version"
+}
