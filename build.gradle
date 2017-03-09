@@ -156,8 +156,8 @@ task deployNodes(type: net.corda.plugins.Cordform, dependsOn: ['build']) {
         nearestCity "London"
         advertisedServices = []
         messagingPort 10012
-        webPort 10013
-        rpcPort 10014
+        rpcPort 10013
+        webPort 10014
         cordapps = []
     }
     node {

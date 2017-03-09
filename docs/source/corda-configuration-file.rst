@@ -83,8 +83,7 @@ path to the node's base directory.
 
 :messagingServerAddress: The address of the ArtemisMQ broker instance. If not provided the node will run one locally.
 
-:rpcAddress: The address of the Artemis RPC broker instance. If not provided the node will run one locally, one port higher than
-     the messaging server address.
+:rpcAddress: The address of the Artemis RPC broker instance. If not provided the node will start without RPC connectivity.
 
 :webAddress: The host and port on which the bundled webserver will listen if it is started.
 
