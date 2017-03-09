@@ -185,7 +185,7 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
 
     /**
      * Authenticated clients connecting to us fall in one of the following groups:
-     * 1. The node hosting us and any of its logically connected components. These are given full access to all valid queues.
+     * 1. The node itself. It is given full access to all valid queues.
      * 2. Peers on the same network as us. These are only given permission to send to our P2P inbound queue.
      * 3. RPC users. These are only given sufficient access to perform RPC with us.
      * 4. Verifiers. These are given read access to the verification request queue and write access to the response queue.

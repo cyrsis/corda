@@ -18,8 +18,8 @@ import net.corda.core.utilities.trace
 import net.corda.node.ArtemisTcpTransport
 import net.corda.node.ConnectionDirection
 import net.corda.node.VerifierApi
-import net.corda.node.VerifierApi.Companion.VERIFICATION_REQUESTS_QUEUE_NAME
-import net.corda.node.VerifierApi.Companion.VERIFICATION_RESPONSES_QUEUE_NAME_PREFIX
+import net.corda.node.VerifierApi.VERIFICATION_REQUESTS_QUEUE_NAME
+import net.corda.node.VerifierApi.VERIFICATION_RESPONSES_QUEUE_NAME_PREFIX
 import net.corda.node.services.RPCUserService
 import net.corda.node.services.api.MessagingServiceInternal
 import net.corda.node.services.config.NodeConfiguration
@@ -184,6 +184,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
                     log.warn("No connected verifier listening on $VERIFICATION_REQUESTS_QUEUE_NAME!")
                 }
             }
+
             if (config.verifierType == VerifierType.OutOfProcess) {
                 session.createQueue(VerifierApi.VERIFICATION_REQUESTS_QUEUE_NAME, VerifierApi.VERIFICATION_REQUESTS_QUEUE_NAME)
                 session.createQueue(verifierResponseAddress, verifierResponseAddress)

@@ -32,7 +32,7 @@ abstract class OutOfProcessTransactionVerifierService : TransactionVerifierServi
     override fun verify(transaction: LedgerTransaction): ListenableFuture<*> {
         val future = SettableFuture.create<Unit>()
         val nonce = random63BitValue()
-        verificationResponseFutures.set(nonce, future)
+        verificationResponseFutures[nonce] = future
         sendRequest(nonce, transaction)
 
         return future

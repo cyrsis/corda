@@ -5,6 +5,7 @@ import net.corda.core.checkedAdd
 import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
 import net.corda.core.flows.FlowLogic
+import net.corda.core.getOrThrow
 import net.corda.core.node.recordTransactions
 import net.corda.core.serialization.CordaSerializable
 import net.corda.core.transactions.LedgerTransaction
@@ -109,7 +110,7 @@ class ResolveTransactionsFlow(private val txHashes: Set<SecureHash>,
             val ltx = stx.toLedgerTransaction(serviceHub)
             // Block on each verification request.
             // TODO We could recover some parallelism from the dependency graph.
-            serviceHub.transactionVerifierService.verify(ltx).get()
+            serviceHub.transactionVerifierService.verify(ltx).getOrThrow()
             serviceHub.recordTransactions(stx)
             result += ltx
         }

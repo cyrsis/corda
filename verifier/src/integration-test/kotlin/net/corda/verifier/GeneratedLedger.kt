@@ -3,16 +3,10 @@ package net.corda.verifier
 import net.corda.client.mock.*
 import net.corda.core.contracts.*
 import net.corda.core.crypto.*
-import net.corda.core.node.ServicesForResolution
-import net.corda.core.node.services.AttachmentStorage
-import net.corda.core.node.services.AttachmentsStorageService
-import net.corda.core.node.services.IdentityService
 import net.corda.core.transactions.LedgerTransaction
 import net.corda.core.transactions.WireTransaction
 import java.io.ByteArrayInputStream
-import java.io.InputStream
 import java.math.BigInteger
-import java.nio.file.Path
 import java.util.*
 
 /**
@@ -36,42 +30,10 @@ data class GeneratedLedger(
     }
 
     fun resolveWireTransaction(transaction: WireTransaction): LedgerTransaction {
-        return transaction.toLedgerTransaction(object : ServicesForResolution {
-            override val identityService = object : IdentityService {
-                override fun partyFromKey(key: CompositeKey) = identityMap[key]
-                override fun registerIdentity(party: Party) {
-                    throw UnsupportedOperationException()
-                }
-                override fun getAllIdentities(): Iterable<Party> {
-                    throw UnsupportedOperationException()
-                }
-                override fun partyFromName(name: String): Party? {
-                    throw UnsupportedOperationException()
-                }
-                override fun partyFromAnonymous(party: AnonymousParty): Party? {
-                    throw UnsupportedOperationException()
-                }
-
-            }
-            override val storageService = object : AttachmentsStorageService {
-                override val attachments = object : AttachmentStorage {
-                    override fun openAttachment(id: SecureHash) = attachmentMap[id]
-                    override fun importAttachment(jar: InputStream): SecureHash {
-                        throw UnsupportedOperationException()
-                    }
-                    override var automaticallyExtractAttachments: Boolean
-                        get() = throw UnsupportedOperationException()
-                        set(value) = throw UnsupportedOperationException()
-                    override var storePath: Path
-                        get() = throw UnsupportedOperationException()
-                        set(value) = throw UnsupportedOperationException()
-                }
-            }
-
-            override fun loadState(stateRef: StateRef): TransactionState<*> {
-                return hashTransactionMap.get(stateRef.txhash)?.outputs?.get(stateRef.index)!!
-            }
-        }
+        return transaction.toLedgerTransaction(
+                resolveIdentity = { identityMap[it] },
+                resolveAttachment = { attachmentMap[it] },
+                resolveStateRef = { hashTransactionMap[it.txhash]?.outputs?.get(it.index) }
         )
     }
 

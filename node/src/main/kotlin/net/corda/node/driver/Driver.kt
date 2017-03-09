@@ -283,8 +283,8 @@ class ShutdownManager(private val executorService: ExecutorService) {
     private val state = ThreadBox(State())
 
     fun shutdown() {
-        require(!state.locked { isShutdown })
         val shutdownFutures = state.locked {
+            require(!isShutdown)
             isShutdown = true
             registeredShutdowns
         }
