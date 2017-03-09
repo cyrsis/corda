@@ -58,7 +58,6 @@ interface AffinityExecutor : Executor {
         }
 
         private val threads = Collections.synchronizedSet(HashSet<Thread>())
-        private val uncaughtExceptionHandler = Thread.currentThread().uncaughtExceptionHandler
 
         init {
             setThreadFactory(fun(runnable: Runnable): Thread {
@@ -76,11 +75,6 @@ interface AffinityExecutor : Executor {
                 threads += thread
                 return thread
             })
-        }
-
-        override fun afterExecute(r: Runnable, t: Throwable?) {
-            if (t != null)
-                uncaughtExceptionHandler.uncaughtException(Thread.currentThread(), t)
         }
 
         override val isOnThread: Boolean get() = Thread.currentThread() in threads
