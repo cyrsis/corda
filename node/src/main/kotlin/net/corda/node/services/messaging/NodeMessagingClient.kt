@@ -93,7 +93,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
     /**
      * Apart from the NetworkMapService this is the only other address accessible to the node outside of lookups against the NetworkMapCache.
      */
-    override val myAddress: SingleMessageRecipient = if (myIdentity != null) {
+    override var myAddress: SingleMessageRecipient = if (myIdentity != null) {
         NodeAddress.asPeer(myIdentity, serverHostPort)
     } else {
         NetworkMapAddress(serverHostPort)
@@ -272,6 +272,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
                 override val peer: X500Name = X500Name(user)
                 override val debugTimestamp: Instant = Instant.ofEpochMilli(message.timestamp)
                 override val uniqueMessageId: UUID = uuid
+                override val originHost: String? = message.getStringProperty("originHost")
                 override fun toString() = "$topic#${data.opaque()}"
             }
 
@@ -296,6 +297,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
             //
             // Note that handlers may re-enter this class. We aren't holding any locks and methods like
             // start/run/stop have re-entrancy assertions at the top, so it is OK.
+            println("${config.myLegalName}: Delivering message from: ${msg.peer}, with topic ${msg.topicSession}")
             nodeExecutor.fetchFrom {
                 databaseTransaction(database) {
                     if (msg.uniqueMessageId in processedMessages) {
@@ -305,6 +307,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
                             // TODO: Implement dead letter queue, and send it there.
                             log.warn("Received message ${msg.uniqueMessageId} for ${msg.topicSession} that doesn't have any registered handlers yet")
                         } else {
+                            println("Calling handlers")
                             callHandlers(msg, deliverTo)
                         }
                         // TODO We will at some point need to decide a trimming policy for the id's
@@ -382,6 +385,8 @@ class NodeMessagingClient(override val config: NodeConfiguration,
                 }
                 log.trace { "Send to: $mqAddress topic: ${message.topicSession.topic} " +
                         "sessionID: ${message.topicSession.sessionID} uuid: ${message.uniqueMessageId}" }
+
+                println("${config.myLegalName}: Sending message with topic ${message.topicSession}")
                 producer!!.send(mqAddress, artemisMessage)
             }
         }
@@ -407,6 +412,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
             val queueQuery = session!!.queueQuery(SimpleString(queueName))
             if (!queueQuery.isExists) {
                 log.info("Create fresh queue $queueName bound on same address")
+                println("Trying to create a queue: $queueName")
                 session!!.createQueue(queueName, queueName, true)
             }
         }

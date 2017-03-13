@@ -1,6 +1,9 @@
 package net.corda.node.services.network
 
 import com.google.common.annotations.VisibleForTesting
+import com.google.common.net.HostAndPort
+import com.sun.net.httpserver.HttpExchange
+import com.sun.net.httpserver.HttpHandler
 import kotlinx.support.jdk8.collections.compute
 import net.corda.core.ThreadBox
 import net.corda.core.crypto.DigitalSignature
@@ -24,7 +27,10 @@ import net.corda.core.utilities.loggerFor
 import net.corda.flows.ServiceRequestMessage
 import net.corda.node.services.api.AbstractNodeService
 import net.corda.node.services.api.ServiceHubInternal
+import net.corda.node.services.messaging.ArtemisMessagingComponent
+import net.corda.node.services.network.NetworkMapService.Companion.CHECK_IP
 import net.corda.node.utilities.AddOrRemove
+import net.corda.core.crypto.Base58
 import java.security.PrivateKey
 import java.security.SignatureException
 import java.time.Instant
@@ -33,6 +39,11 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import javax.annotation.concurrent.ThreadSafe
+import java.io.IOException
+import java.net.InetSocketAddress
+import com.sun.net.httpserver.HttpServer
+
+
 
 /**
  * A network map contains lists of nodes on the network along with information about their identity keys, services
@@ -53,6 +64,7 @@ interface NetworkMapService {
     companion object {
         val DEFAULT_EXPIRATION_PERIOD: Period = Period.ofWeeks(4)
         val FETCH_TOPIC = "platform.network_map.fetch"
+        val CHECK_IP = "platform.network_map.ip"
         val QUERY_TOPIC = "platform.network_map.query"
         val REGISTER_TOPIC = "platform.network_map.register"
         val SUBSCRIPTION_TOPIC = "platform.network_map.subscribe"
@@ -100,8 +112,16 @@ interface NetworkMapService {
 
     @CordaSerializable
     data class Update(val wireReg: WireNodeRegistration, val mapVersion: Int, val replyTo: MessageRecipients)
+
     @CordaSerializable
     data class UpdateAcknowledge(val mapVersion: Int, val replyTo: MessageRecipients)
+
+    @CordaSerializable
+    data class RequestIp(val replyPort: Int, val legalName: String, override val replyTo: SingleMessageRecipient,
+                         override val sessionID: Long = random63BitValue()) : ServiceRequestMessage
+
+    @CordaSerializable
+    data class ResponseIp(val host: String)
 }
 
 @ThreadSafe
@@ -168,6 +188,20 @@ abstract class AbstractNetworkMapService
         handlers += net.addMessageHandler(NetworkMapService.PUSH_ACK_TOPIC, DEFAULT_SESSION_ID) { message, r ->
             val req = message.data.deserialize<NetworkMapService.UpdateAcknowledge>()
             processAcknowledge(req)
+        }
+        handlers += net.addMessageHandler(NetworkMapService.CHECK_IP, DEFAULT_SESSION_ID) { message, r ->
+            val remoteHost = message.originHost ?: throw IllegalStateException("No origin host provided")
+            val request = message.data.deserialize<NetworkMapService.RequestIp>()
+            val response = NetworkMapService.ResponseIp(remoteHost)
+            val msg = net.createMessage(CHECK_IP, request.sessionID, response.serialize().bytes)
+
+            val recipient = (request.replyTo as ArtemisMessagingComponent.NodeAddress)
+            val replyAddress = HostAndPort.fromParts(remoteHost, recipient.hostAndPort.port)
+
+            val replyInfo = request.legalName to replyAddress
+            val encoded = Base58.encode(replyInfo.serialize().bytes)
+            val replyTo = ArtemisMessagingComponent.NodeAddress(ArtemisMessagingComponent.DIRECT_PREFIX + encoded, replyAddress)
+            net.send(msg, replyTo)
         }
     }
 
@@ -382,3 +416,23 @@ data class LastAcknowledgeInfo(val mapVersion: Int)
 
 @CordaSerializable
 data class NodeRegistrationInfo(val reg: NodeRegistration, val mapVersion: Int)
+
+
+class IPProvider {
+    init {
+        val server = HttpServer.create(InetSocketAddress(8054), 0)
+        server.createContext("/ip", MyHandler())
+        server.executor = null // creates a default executor
+        server.start()
+    }
+
+    private class MyHandler : HttpHandler {
+        override fun handle(t: HttpExchange) {
+            val response = t.remoteAddress.hostString
+            t.sendResponseHeaders(200, response.length.toLong())
+            val os = t.responseBody
+            os.write(response.toByteArray())
+            os.close()
+        }
+    }
+}

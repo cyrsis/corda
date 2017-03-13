@@ -14,6 +14,7 @@ import net.corda.core.node.NodeInfo
 import net.corda.core.node.services.NetworkMapCache
 import net.corda.core.node.services.NetworkMapCache.MapChange
 import net.corda.core.seconds
+import net.corda.core.serialization.deserialize
 import net.corda.core.utilities.debug
 import net.corda.core.utilities.loggerFor
 import net.corda.node.printBasicNodeInfo
@@ -27,18 +28,26 @@ import net.corda.node.services.messaging.ArtemisMessagingComponent.ConnectionDir
 import net.corda.node.services.messaging.NodeLoginModule.Companion.NODE_ROLE
 import net.corda.node.services.messaging.NodeLoginModule.Companion.PEER_ROLE
 import net.corda.node.services.messaging.NodeLoginModule.Companion.RPC_ROLE
+import net.corda.node.services.messaging.NodeMessagingClient.Companion.TOPIC_PROPERTY
+import net.corda.node.services.network.NetworkMapService.Companion.CHECK_IP
+import net.corda.node.services.network.NetworkMapService.Companion.REGISTER_TOPIC
+import org.apache.activemq.artemis.api.core.Interceptor
+import org.apache.activemq.artemis.api.core.Message
 import org.apache.activemq.artemis.api.core.SimpleString
 import org.apache.activemq.artemis.core.config.BridgeConfiguration
 import org.apache.activemq.artemis.core.config.Configuration
 import org.apache.activemq.artemis.core.config.CoreQueueConfiguration
 import org.apache.activemq.artemis.core.config.impl.ConfigurationImpl
 import org.apache.activemq.artemis.core.config.impl.SecurityConfiguration
+import org.apache.activemq.artemis.core.protocol.core.Packet
+import org.apache.activemq.artemis.core.protocol.core.impl.wireformat.SessionSendMessage
 import org.apache.activemq.artemis.core.remoting.impl.netty.NettyConnection
 import org.apache.activemq.artemis.core.remoting.impl.netty.NettyConnector
 import org.apache.activemq.artemis.core.remoting.impl.netty.NettyConnectorFactory
 import org.apache.activemq.artemis.core.security.Role
 import org.apache.activemq.artemis.core.server.ActiveMQServer
 import org.apache.activemq.artemis.core.server.impl.ActiveMQServerImpl
+import org.apache.activemq.artemis.spi.core.protocol.RemotingConnection
 import org.apache.activemq.artemis.spi.core.remoting.*
 import org.apache.activemq.artemis.spi.core.security.ActiveMQJAASSecurityManager
 import org.apache.activemq.artemis.spi.core.security.jaas.CertificateCallback
@@ -106,6 +115,8 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
         config.baseDirectory.expectedOnDefaultFileSystem()
     }
 
+    fun getControl() = activeMQServer.activeMQServerControl!!
+
     /**
      * The server will make sure the bridge exists on network map changes, see method [updateBridgesOnNetworkChange]
      * We assume network map will be updated accordingly when the client node register with the network map server.
@@ -131,12 +142,14 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
         val config = createArtemisConfig()
         val securityManager = createArtemisSecurityManager()
         activeMQServer = ActiveMQServerImpl(config, securityManager).apply {
+
             // Throw any exceptions which are detected during startup
             registerActivationFailureListener { exception -> throw exception }
             // Some types of queue might need special preparation on our side, like dialling back or preparing
             // a lazily initialised subsystem.
             registerPostQueueCreationCallback { deployBridgesFromNewQueue(it.toString()) }
             registerPostQueueDeletionCallback { address, qName -> log.debug { "Queue deleted: $qName for $address" } }
+
         }
         activeMQServer.start()
         printBasicNodeInfo("Node listening on address", myHostPort.toString())
@@ -148,6 +161,7 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
         journalDirectory = (artemisDir / "journal").toString()
         largeMessagesDirectory = (artemisDir / "large-messages").toString()
         acceptorConfigurations = setOf(tcpTransport(Inbound, "0.0.0.0", myHostPort.port))
+        incomingInterceptorClassNames = listOf(RemoteInterceptor::class.java.canonicalName)
         // Enable built in message deduplication. Note we still have to do our own as the delayed commits
         // and our own definition of commit mean that the built in deduplication cannot remove all duplicates.
         idCacheSize = 2000 // Artemis Default duplicate cache size i.e. a guess
@@ -268,6 +282,13 @@ class ArtemisMessagingServer(override val config: NodeConfiguration,
                 }
             } catch (e: AddressFormatException) {
                 log.error("Flow violation: Could not parse service queue name as Base 58: $queueName")
+            }
+
+            queueName.startsWith(DIRECT_PREFIX) -> {
+                println("Trying to parse: $queueName")
+                val (name, address) = Base58.decode(queueName.substring(DIRECT_PREFIX.length)).deserialize<Pair<String,HostAndPort>>()
+                println("Parsed address from queue: $address")
+                deployBridge(queueName, address, name)
             }
         }
     }
@@ -548,4 +569,17 @@ class NodeLoginModule : LoginModule {
     private fun clear() {
         loginSucceeded = false
     }
+}
+
+class RemoteInterceptor : Interceptor {
+    override fun intercept(packet: Packet, connection: RemotingConnection): Boolean {
+        if (packet is SessionSendMessage && isRegistrationRequest(packet.message)) {
+            val remoteHost = extractHost(connection.remoteAddress)
+            packet.message.putStringProperty("originHost", remoteHost)
+        }
+        return true
+    }
+
+    private fun isRegistrationRequest(message: Message) = message.getStringProperty(TOPIC_PROPERTY) == CHECK_IP
+    private fun extractHost(address: String) = address.split("/", ":")[1]
 }

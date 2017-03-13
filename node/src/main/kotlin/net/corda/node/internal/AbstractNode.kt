@@ -2,6 +2,7 @@ package net.corda.node.internal
 
 import com.codahale.metrics.MetricRegistry
 import com.google.common.annotations.VisibleForTesting
+import com.google.common.net.HostAndPort
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import com.google.common.util.concurrent.SettableFuture
@@ -32,6 +33,7 @@ import net.corda.node.services.events.NodeSchedulerService
 import net.corda.node.services.events.ScheduledActivityObserver
 import net.corda.node.services.identity.InMemoryIdentityService
 import net.corda.node.services.keys.PersistentKeyManagementService
+import net.corda.node.services.messaging.ArtemisMessagingComponent
 import net.corda.node.services.network.InMemoryNetworkMapCache
 import net.corda.node.services.network.NetworkMapService
 import net.corda.node.services.network.NetworkMapService.RegistrationResponse
@@ -401,12 +403,76 @@ abstract class AbstractNode(open val configuration: NodeConfiguration,
      */
     protected open fun registerWithNetworkMap(): ListenableFuture<Unit> {
         val address = networkMapAddress ?: info.address
-        // Register for updates, even if we're the one running the network map.
-        return sendNetworkMapRegistration(address).flatMap { response ->
-            check(response.success) { "The network map service rejected our registration request" }
-            // This Future will complete on the same executor as sendNetworkMapRegistration, namely the one used by net
-            services.networkMapCache.addMapService(net, address, true, null)
+
+        if (networkMapAddress != null) {
+            val future = obtainIP(address)
+            val retFuture = SettableFuture.create<Unit>()
+            println("Registering")
+            future.success {
+                val myHost = it.host
+                val currentAddress = (net.myAddress as ArtemisMessagingComponent.NodeAddress)
+                val myPort = currentAddress.hostAndPort.port
+
+                info = NodeInfo(ArtemisMessagingComponent.NodeAddress(currentAddress.queueName, HostAndPort.fromParts(myHost, myPort)),
+                        info.legalIdentity, info.advertisedServices, info.physicalLocation)
+
+                println("Got IP")
+                // Register for updates, even if we're the one running the network map.
+                val mns = sendNetworkMapRegistration(address).flatMap { response ->
+                    check(response.success) { "The network map service rejected our registration request" }
+                    // This Future will complete on the same executor as sendNetworkMapRegistration, namely the one used by net
+                    services.networkMapCache.addMapService(net, address, true, null)
+                }
+                mns.success {
+                    println("Register on network map")
+                    retFuture.set(Unit)
+                }
+            }
+            return retFuture
         }
+        else {
+
+
+            // Register for updates, even if we're the one running the network map.
+            return sendNetworkMapRegistration(address).flatMap { response ->
+                check(response.success) { "The network map service rejected our registration request" }
+                // This Future will complete on the same executor as sendNetworkMapRegistration, namely the one used by net
+                services.networkMapCache.addMapService(net, address, true, null)
+            }
+        }
+    }
+
+    lateinit var obtainIpFuture: ListenableFuture<NetworkMapService.ResponseIp>
+
+//    private fun obtainIP2(address: HostAndPort): String {
+//        val url = "http://" + address.hostText + ":8054/ip"
+//
+//        val obj = URL(url)
+//        val con = obj.openConnection() as HttpURLConnection
+//
+//        // optional default is GET
+//        con.requestMethod = "GET"
+//
+//        val responseCode = con.responseCode
+//        println("\nSending 'GET' request to URL : " + url)
+//        println("Response Code : " + responseCode)
+//
+//
+//        val in1 = BufferedReader(
+//                InputStreamReader(con.inputStream))
+//        val res = in1.readLine()
+//
+//        println(res)
+//
+//        return res
+//    }
+
+    private fun obtainIP(networkMapAddress: SingleMessageRecipient): ListenableFuture<NetworkMapService.ResponseIp> {
+        val request = NetworkMapService.RequestIp((configuration as FullNodeConfiguration).artemisAddress.port, configuration.myLegalName,
+                replyTo = net.myAddress)
+        obtainIpFuture = net.sendRequest<NetworkMapService.ResponseIp>(NetworkMapService.CHECK_IP, request, networkMapAddress)
+
+        return obtainIpFuture
     }
 
     private fun sendNetworkMapRegistration(networkMapAddress: SingleMessageRecipient): ListenableFuture<RegistrationResponse> {

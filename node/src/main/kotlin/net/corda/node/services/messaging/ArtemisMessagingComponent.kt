@@ -42,6 +42,7 @@ abstract class ArtemisMessagingComponent() : SingletonSerializeAsToken() {
         const val RPC_QUEUE_REMOVALS_QUEUE = "rpc.qremovals"
         const val NOTIFICATIONS_ADDRESS = "${INTERNAL_PREFIX}activemq.notifications"
         const val NETWORK_MAP_QUEUE = "${INTERNAL_PREFIX}networkmap"
+        const val DIRECT_PREFIX = "${INTERNAL_PREFIX}direct."
 
         const val VERIFY_PEER_COMMON_NAME = "corda.verifyPeerCommonName"
 

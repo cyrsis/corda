@@ -190,6 +190,7 @@ interface Message {
 interface ReceivedMessage : Message {
     /** The authenticated sender. */
     val peer: X500Name
+    val originHost: String?
 }
 
 /** A singleton that's useful for validating topic strings */
