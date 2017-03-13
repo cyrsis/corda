@@ -20,10 +20,11 @@ abstract class OutOfProcessTransactionVerifierService : SingletonSerializeAsToke
             val response = VerifierApi.VerificationResponse.fromClientMessage(message)
             val resultFuture = verificationResponseFutures.remove(response.verificationId) ?:
                     throw VerificationResultForUnknownTransaction(response.verificationId)
-            if (response.exception == null) {
+            val exception = response.exception
+            if (exception == null) {
                 resultFuture.set(Unit)
             } else {
-                resultFuture.setException(response.exception)
+                resultFuture.setException(exception)
             }
         }
     }

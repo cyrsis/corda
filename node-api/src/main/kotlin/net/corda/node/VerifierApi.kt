@@ -39,7 +39,7 @@ object VerifierApi {
 
     data class VerificationResponse(
             val verificationId: Long,
-            val exception: TransactionVerificationException?
+            val exception: Throwable?
     ) {
         companion object {
             fun fromClientMessage(message: ClientMessage): VerificationResponse {
