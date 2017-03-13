@@ -164,67 +164,71 @@ data class VerifierDriverDSL(
     override fun startVerificationRequestor(name: String): ListenableFuture<VerificationRequestorHandle> {
         val hostAndPort = driverDSL.portAllocation.nextHostAndPort()
         return driverDSL.executorService.submit<VerificationRequestorHandle> {
-            val baseDir = driverDSL.driverDirectory / name
-            val sslConfig = object : SSLConfiguration {
-                override val certificatesDirectory = baseDir / "certificates"
-                override val keyStorePassword: String get() = "cordacadevpass"
-                override val trustStorePassword: String get() = "trustpass"
-            }
-            sslConfig.configureDevKeyAndTrustStores(name)
-
-            val responseQueueNonce = random63BitValue()
-            val responseAddress = "${VerifierApi.VERIFICATION_RESPONSES_QUEUE_NAME_PREFIX}.$responseQueueNonce"
-
-            val artemisConfig = createVerificationRequestorArtemisConfig(baseDir, responseAddress, hostAndPort, sslConfig)
-
-            val securityManager = object : ActiveMQSecurityManager {
-                // We don't need auth, SSL is good enough
-                override fun validateUser(user: String?, password: String?) = true
-                override fun validateUserAndRole(user: String?, password: String?, roles: MutableSet<Role>?, checkType: CheckType?) = true
-            }
-            val server = ActiveMQServerImpl(artemisConfig, securityManager)
-            log.info("Starting verification requestor Artemis server with base dir $baseDir")
-            server.start()
-            driverDSL.shutdownManager.registerShutdown(Futures.immediateFuture {
-                server.stop()
-            })
-
-            val locator = ActiveMQClient.createServerLocatorWithoutHA()
-            val transport = ArtemisTcpTransport.tcpTransport(ConnectionDirection.Outbound(), hostAndPort, sslConfig)
-            val sessionFactory = locator.createSessionFactory(transport)
-            val session = sessionFactory.createSession()
-            driverDSL.shutdownManager.registerShutdown(Futures.immediateFuture {
-                session.stop()
-                sessionFactory.close()
-            })
-            val producer = session.createProducer(VerifierApi.VERIFICATION_REQUESTS_QUEUE_NAME)
-
-            val consumer = session.createConsumer(responseAddress)
-            // We demux the individual txs ourselves to avoid race when a new verifier is added
-            val verificationResponseFutures = ConcurrentHashMap<Long, SettableFuture<Throwable?>>()
-            val asd = AtomicInteger(0)
-            consumer.setMessageHandler {
-                val result = VerifierApi.VerificationResponse.fromClientMessage(it)
-                val resultFuture = verificationResponseFutures.remove(result.verificationId)
-                log.info("${verificationResponseFutures.size} verifications left")
-                if (resultFuture != null) {
-                    resultFuture.set(result.exception)
-                } else {
-                    log.warn("Verification requestor $name can't find tx result future with id ${result.verificationId}, possible dupe no ${asd.incrementAndGet()}")
-                }
-            }
-            session.start()
-            VerificationRequestorHandle(
-                    artemisAddress = hostAndPort,
-                    responseAddress = SimpleString(responseAddress),
-                    session = session,
-                    requestProducer = producer,
-                    addVerificationFuture = { verificationNonce, future ->
-                        verificationResponseFutures.put(verificationNonce, future)
-                    },
-                    executorService = driverDSL.executorService
-            )
+            startVerificationRequestorInternal(name, hostAndPort)
         }
+    }
+
+    private fun startVerificationRequestorInternal(name: String, hostAndPort: HostAndPort): VerificationRequestorHandle {
+        val baseDir = driverDSL.driverDirectory / name
+        val sslConfig = object : SSLConfiguration {
+            override val certificatesDirectory = baseDir / "certificates"
+            override val keyStorePassword: String get() = "cordacadevpass"
+            override val trustStorePassword: String get() = "trustpass"
+        }
+        sslConfig.configureDevKeyAndTrustStores(name)
+
+        val responseQueueNonce = random63BitValue()
+        val responseAddress = "${VerifierApi.VERIFICATION_RESPONSES_QUEUE_NAME_PREFIX}.$responseQueueNonce"
+
+        val artemisConfig = createVerificationRequestorArtemisConfig(baseDir, responseAddress, hostAndPort, sslConfig)
+
+        val securityManager = object : ActiveMQSecurityManager {
+            // We don't need auth, SSL is good enough
+            override fun validateUser(user: String?, password: String?) = true
+            override fun validateUserAndRole(user: String?, password: String?, roles: MutableSet<Role>?, checkType: CheckType?) = true
+        }
+
+        val server = ActiveMQServerImpl(artemisConfig, securityManager)
+        log.info("Starting verification requestor Artemis server with base dir $baseDir")
+        server.start()
+        driverDSL.shutdownManager.registerShutdown(Futures.immediateFuture {
+            server.stop()
+        })
+
+        val locator = ActiveMQClient.createServerLocatorWithoutHA()
+        val transport = ArtemisTcpTransport.tcpTransport(ConnectionDirection.Outbound(), hostAndPort, sslConfig)
+        val sessionFactory = locator.createSessionFactory(transport)
+        val session = sessionFactory.createSession()
+        driverDSL.shutdownManager.registerShutdown(Futures.immediateFuture {
+            session.stop()
+            sessionFactory.close()
+        })
+        val producer = session.createProducer(VerifierApi.VERIFICATION_REQUESTS_QUEUE_NAME)
+
+        val consumer = session.createConsumer(responseAddress)
+        // We demux the individual txs ourselves to avoid race when a new verifier is added
+        val verificationResponseFutures = ConcurrentHashMap<Long, SettableFuture<Throwable?>>()
+        consumer.setMessageHandler {
+            val result = VerifierApi.VerificationResponse.fromClientMessage(it)
+            val resultFuture = verificationResponseFutures.remove(result.verificationId)
+            log.info("${verificationResponseFutures.size} verifications left")
+            if (resultFuture != null) {
+                resultFuture.set(result.exception)
+            } else {
+                log.warn("Verification requestor $name can't find tx result future with id ${result.verificationId}, possible dupe")
+            }
+        }
+        session.start()
+        return VerificationRequestorHandle(
+                artemisAddress = hostAndPort,
+                responseAddress = SimpleString(responseAddress),
+                session = session,
+                requestProducer = producer,
+                addVerificationFuture = { verificationNonce, future ->
+                    verificationResponseFutures.put(verificationNonce, future)
+                },
+                executorService = driverDSL.executorService
+        )
     }
 
     override fun startVerifier(address: HostAndPort): ListenableFuture<VerifierHandle> {

@@ -331,7 +331,6 @@ interface TransactionVerifierService {
     /**
      * @param transaction The transaction to be verified.
      * @return A future that completes successfully if the transaction verified, or sets an exception the verifier threw.
-     * @throws Throwable
      */
     fun verify(transaction: LedgerTransaction): ListenableFuture<*>
 }

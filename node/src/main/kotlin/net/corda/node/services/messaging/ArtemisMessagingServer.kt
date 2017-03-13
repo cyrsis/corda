@@ -584,7 +584,7 @@ class NodeLoginModule : LoginModule {
             return loginSucceeded
         } catch (exception: FailedLoginException) {
             log.warn("$exception")
-            return false
+            throw exception
         }
     }
 

@@ -30,7 +30,7 @@ class VerifierTests {
     }
 
     @Test
-    fun singleVerifierWorksWithRequestor() {
+    fun `single verifier works with requestor`() {
         verifierDriver(automaticallyStartNetworkMap = false) {
             val aliceFuture = startVerificationRequestor("Alice")
             val transactions = generateTransactions(100)
@@ -47,7 +47,7 @@ class VerifierTests {
     }
 
     @Test
-    fun multipleVerifiersWorkWithRequestor() {
+    fun `multiple verifiers work with requestor`() {
         verifierDriver(automaticallyStartNetworkMap = false) {
             val aliceFuture = startVerificationRequestor("Alice")
             val transactions = generateTransactions(100)
@@ -67,27 +67,25 @@ class VerifierTests {
     }
 
     @Test
-    fun verificationRedistributedOnVerifierDeath() {
+    fun `verification redistributes on verifier death`() {
         verifierDriver(automaticallyStartNetworkMap = false) {
             val aliceFuture = startVerificationRequestor("Alice")
             val numberOfTransactions = 100
             val transactions = generateTransactions(numberOfTransactions)
             val alice = aliceFuture.get()
-            val a = startVerifier(alice)
-            val b = startVerifier(alice)
-            val c = startVerifier(alice)
+            val verifier1 = startVerifier(alice)
+            val verifier2 = startVerifier(alice)
+            val verifier3 = startVerifier(alice)
             alice.waitUntilNumberOfVerifiers(3)
-            val remainingCounter = AtomicInteger(numberOfTransactions)
+            val remainingTransactionsCount = AtomicInteger(numberOfTransactions)
             val futures = transactions.map { transaction ->
                 val future = alice.verifyTransaction(transaction)
                 // Kill verifiers as results are coming in, forcing artemis to redistribute.
                 future.map {
-                    val remaining = remainingCounter.decrementAndGet()
-                    if (remaining == 33) {
-                        a.get().process.destroy()
-                    }
-                    if (remaining == 66) {
-                        b.get().process.destroy()
+                    val remaining = remainingTransactionsCount.decrementAndGet()
+                    when (remaining) {
+                        33 -> verifier1.get().process.destroy()
+                        66 -> verifier2.get().process.destroy()
                     }
                     it
                 }
@@ -97,7 +95,7 @@ class VerifierTests {
     }
 
     @Test
-    fun verificationRequestWaitsUntilVerifierComesOnline() {
+    fun `verification request waits until verifier comes online`() {
         verifierDriver(automaticallyStartNetworkMap = false) {
             val aliceFuture = startVerificationRequestor("Alice")
             val transactions = generateTransactions(100)
@@ -109,7 +107,7 @@ class VerifierTests {
     }
 
     @Test
-    fun singleVerifierWorksWithNode() {
+    fun `single verifier works with a node`() {
         verifierDriver {
             val aliceFuture = startNode("Alice", verifierType = VerifierType.OutOfProcess)
             val notaryFuture = startNode("Notary", advertisedServices = setOf(ServiceInfo(ValidatingNotaryService.type)))
