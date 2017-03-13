@@ -5,8 +5,10 @@
         <Property name="log-path">logs</Property>
         <Property name="log-name">node-${hostName}</Property>
         <Property name="archive">${sys:log-path}/archive</Property>
-        <Property name="consoleLogLevel">error</Property>
-        <Property name="defaultLogLevel">info</Property>
+        <Property name="consoleLogLevel">info
+        </Property>
+        <Property name="defaultLogLevel">trace
+        </Property>
     </Properties>
 
     <ThresholdFilter level="trace"/>

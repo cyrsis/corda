@@ -1,5 +1,6 @@
 package net.corda.node
 
+import net.corda.core.contracts.TransactionVerificationException
 import net.corda.core.serialization.deserialize
 import net.corda.core.serialization.serialize
 import net.corda.core.transactions.LedgerTransaction
@@ -38,7 +39,7 @@ object VerifierApi {
 
     data class VerificationResponse(
             val verificationId: Long,
-            val exception: Throwable?
+            val exception: TransactionVerificationException?
     ) {
         companion object {
             fun fromClientMessage(message: ClientMessage): VerificationResponse {

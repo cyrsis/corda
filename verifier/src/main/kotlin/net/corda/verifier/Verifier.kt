@@ -54,6 +54,7 @@ class Verifier {
                     VerifierApi.VERIFIER_USERNAME, VerifierApi.VERIFIER_USERNAME, false, true, true, locator.isPreAcknowledge, locator.ackBatchSize
             )
             Runtime.getRuntime().addShutdownHook(Thread {
+                log.info("Shutting down")
                 session.close()
                 sessionFactory.close()
             })
@@ -72,9 +73,10 @@ class Verifier {
                 val response = VerifierApi.VerificationResponse(request.verificationId, result.error)
                 response.writeToClientMessage(reply)
                 replyProducer.send(request.responseAddress, reply)
+                it.acknowledge()
             }
-            log.debug("Starting session...")
             session.start()
+            log.info("Verifier started")
             Thread.sleep(Long.MAX_VALUE)
         }
     }

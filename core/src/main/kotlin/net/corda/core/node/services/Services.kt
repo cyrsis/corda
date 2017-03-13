@@ -330,7 +330,9 @@ interface SchedulerService {
 interface TransactionVerifierService {
     /**
      * @param transaction The transaction to be verified.
-     * @return A future that completes successfully if the transaction verified, or sets an exception
+     * @return A future that completes successfully if the transaction verified, or sets an exception of the verification
+     *     failure otherwise.
+     * @throws TransactionVerificationException
      */
     fun verify(transaction: LedgerTransaction): ListenableFuture<*>
 }

@@ -3,6 +3,7 @@ package net.corda.verifier
 import com.google.common.util.concurrent.Futures
 import net.corda.client.mock.generateOrFail
 import net.corda.core.contracts.DOLLARS
+import net.corda.core.map
 import net.corda.core.messaging.startFlow
 import net.corda.core.node.services.ServiceInfo
 import net.corda.core.serialization.OpaqueBytes
@@ -13,7 +14,7 @@ import net.corda.node.services.config.VerifierType
 import net.corda.node.services.transactions.ValidatingNotaryService
 import org.junit.Test
 import java.util.*
-import kotlin.test.assertEquals
+import java.util.concurrent.atomic.AtomicInteger
 
 class VerifierTests {
     private fun generateTransactions(number: Int): List<LedgerTransaction> {
@@ -51,16 +52,59 @@ class VerifierTests {
             val aliceFuture = startVerificationRequestor("Alice")
             val transactions = generateTransactions(100)
             val alice = aliceFuture.get()
-            for (i in 1..4) {
+            val numberOfVerifiers = 4
+            for (i in 1..numberOfVerifiers) {
                 startVerifier(alice)
             }
-            alice.waitUntilNumberOfVerifiers(10)
+            alice.waitUntilNumberOfVerifiers(numberOfVerifiers)
             val results = Futures.allAsList(transactions.map { alice.verifyTransaction(it) }).get()
             results.forEach {
                 if (it != null) {
                     throw it
                 }
             }
+        }
+    }
+
+    @Test
+    fun verificationRedistributedOnVerifierDeath() {
+        verifierDriver(automaticallyStartNetworkMap = false) {
+            val aliceFuture = startVerificationRequestor("Alice")
+            val numberOfTransactions = 100
+            val transactions = generateTransactions(numberOfTransactions)
+            val alice = aliceFuture.get()
+            val a = startVerifier(alice)
+            val b = startVerifier(alice)
+            val c = startVerifier(alice)
+            alice.waitUntilNumberOfVerifiers(3)
+            val remainingCounter = AtomicInteger(numberOfTransactions)
+            val futures = transactions.map { transaction ->
+                val future = alice.verifyTransaction(transaction)
+                // Kill verifiers as results are coming in, forcing artemis to redistribute.
+                future.map {
+                    val remaining = remainingCounter.decrementAndGet()
+                    if (remaining == 33) {
+                        a.get().process.destroy()
+                    }
+                    if (remaining == 66) {
+                        b.get().process.destroy()
+                    }
+                    it
+                }
+            }
+            Futures.allAsList(futures).get()
+        }
+    }
+
+    @Test
+    fun verificationRequestWaitsUntilVerifierComesOnline() {
+        verifierDriver(automaticallyStartNetworkMap = false) {
+            val aliceFuture = startVerificationRequestor("Alice")
+            val transactions = generateTransactions(100)
+            val alice = aliceFuture.get()
+            val futures = transactions.map { alice.verifyTransaction(it) }
+            startVerifier(alice)
+            Futures.allAsList(futures).get()
         }
     }
 

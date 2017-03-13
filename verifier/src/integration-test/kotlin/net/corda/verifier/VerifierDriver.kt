@@ -9,6 +9,7 @@ import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
 import net.corda.config.SSLConfiguration
 import net.corda.core.div
+import net.corda.core.map
 import net.corda.core.random63BitValue
 import net.corda.core.transactions.LedgerTransaction
 import net.corda.core.utilities.loggerFor
@@ -42,7 +43,7 @@ interface VerifierExposedDSLInterface : DriverDSLExposedInterface {
     /** Starts a lightweight verification requestor that implements the Node's Verifier API */
     fun startVerificationRequestor(name: String): ListenableFuture<VerificationRequestorHandle>
     /** Starts an out of process verifier connected to [address] */
-    fun startVerifier(address: HostAndPort)
+    fun startVerifier(address: HostAndPort): ListenableFuture<VerifierHandle>
     /**
      * Waits until [number] verifiers are listening for verification requests coming from the Node. Check
      * [VerificationRequestorHandle.waitUntilNumberOfVerifiers] for an equivalent for requestors.
@@ -84,6 +85,11 @@ fun <A> verifierDriver(
         dsl = dsl
 )
 
+/** A handle for a verifier */
+data class VerifierHandle(
+        val process: Process
+)
+
 /** A handle for the verification requestor */
 data class VerificationRequestorHandle(
         val artemisAddress: HostAndPort,
@@ -123,18 +129,18 @@ data class VerifierDriverDSL(
 
     companion object {
         private val log = loggerFor<VerifierDriverDSL>()
-        fun createConfiguration(baseDirectory: String, nodeHostAndPort: HostAndPort): Config {
+        fun createConfiguration(baseDirectory: Path, nodeHostAndPort: HostAndPort): Config {
             return ConfigFactory.parseMap(
                     mapOf(
-                            "baseDirectory" to baseDirectory,
+                            "baseDirectory" to baseDirectory.toString(),
                             "nodeHostAndPort" to nodeHostAndPort.toString()
                     )
             )
         }
 
-        fun createVerificationRequestorArtemisConfig(responseAddress: String, hostAndPort: HostAndPort, sslConfiguration: SSLConfiguration): Configuration {
+        fun createVerificationRequestorArtemisConfig(baseDirectory: Path, responseAddress: String, hostAndPort: HostAndPort, sslConfiguration: SSLConfiguration): Configuration {
             return ConfigurationImpl().apply {
-                val artemisDir = "baseDirectory/artemis"
+                val artemisDir = "$baseDirectory/artemis"
                 bindingsDirectory = "$artemisDir/bindings"
                 journalDirectory = "$artemisDir/journal"
                 largeMessagesDirectory = "$artemisDir/large-messages"
@@ -151,7 +157,6 @@ data class VerifierDriverDSL(
                             isDurable = false
                         }
                 )
-
             }
         }
     }
@@ -170,7 +175,7 @@ data class VerifierDriverDSL(
             val responseQueueNonce = random63BitValue()
             val responseAddress = "${VerifierApi.VERIFICATION_RESPONSES_QUEUE_NAME_PREFIX}.$responseQueueNonce"
 
-            val artemisConfig = createVerificationRequestorArtemisConfig(responseAddress, hostAndPort, sslConfig)
+            val artemisConfig = createVerificationRequestorArtemisConfig(baseDir, responseAddress, hostAndPort, sslConfig)
 
             val securityManager = object : ActiveMQSecurityManager {
                 // We don't need auth, SSL is good enough
@@ -197,10 +202,16 @@ data class VerifierDriverDSL(
             val consumer = session.createConsumer(responseAddress)
             // We demux the individual txs ourselves to avoid race when a new verifier is added
             val verificationResponseFutures = ConcurrentHashMap<Long, SettableFuture<Throwable?>>()
+            val asd = AtomicInteger(0)
             consumer.setMessageHandler {
                 val result = VerifierApi.VerificationResponse.fromClientMessage(it)
-                val resultFuture = verificationResponseFutures.remove(result.verificationId) ?: throw Exception("Verification requestor $name can't find tx result future with nonce ${result.verificationId}")
-                resultFuture.set(result.exception)
+                val resultFuture = verificationResponseFutures.remove(result.verificationId)
+                log.info("${verificationResponseFutures.size} verifications left")
+                if (resultFuture != null) {
+                    resultFuture.set(result.exception)
+                } else {
+                    log.warn("Verification requestor $name can't find tx result future with id ${result.verificationId}, possible dupe no ${asd.incrementAndGet()}")
+                }
             }
             session.start()
             VerificationRequestorHandle(
@@ -216,12 +227,13 @@ data class VerifierDriverDSL(
         }
     }
 
-    override fun startVerifier(address: HostAndPort) {
+    override fun startVerifier(address: HostAndPort): ListenableFuture<VerifierHandle> {
         log.info("Starting verifier connecting to address $address")
-        val verifierName = "verifier${verifierCount.andIncrement}"
-        val baseDirectory = "${driverDSL.driverDirectory}/$verifierName"
+        val id = verifierCount.andIncrement
+        val verifierName = "verifier$id"
+        val baseDirectory = driverDSL.driverDirectory / "verifierName"
         val config = createConfiguration(baseDirectory, address)
-        writeConfig(Paths.get(baseDirectory), "verifier.conf", config)
+        writeConfig(baseDirectory, "verifier.conf", config)
         Verifier.loadConfiguration(baseDirectory).configureDevKeyAndTrustStores(verifierName)
 
         val className = Verifier::class.java.name
@@ -240,12 +252,14 @@ data class VerifierDriverDSL(
                                 "-XX:+UseG1GC",
                                 "-cp", classpath,
                                 className,
-                                baseDirectory
+                                baseDirectory.toString()
                         )
         val builder = ProcessBuilder(javaArgs)
         builder.inheritIO()
 
-        driverDSL.shutdownManager.registerProcessShutdown(driverDSL.executorService.submit<Process> { builder.start() })
+        val processFuture = driverDSL.executorService.submit<Process> { builder.start() }
+        driverDSL.shutdownManager.registerProcessShutdown(processFuture)
+        return processFuture.map(::VerifierHandle)
     }
 
     private fun <A> NodeHandle.connectToNode(closure: (ClientSession) -> A): A {
