@@ -10,9 +10,9 @@ import javafx.scene.layout.GridPane
 import javafx.scene.layout.Priority
 import javafx.scene.text.TextAlignment
 import javafx.util.StringConverter
-import net.corda.client.fxutils.map
-import net.corda.client.model.Models
-import net.corda.client.model.NetworkIdentityModel
+import net.corda.client.jfx.model.Models
+import net.corda.client.jfx.model.NetworkIdentityModel
+import net.corda.client.jfx.utils.map
 import net.corda.contracts.asset.Cash
 import net.corda.core.contracts.StateAndRef
 import net.corda.core.crypto.AnonymousParty
@@ -90,4 +90,5 @@ fun <A, B> Collection<A>.cross(other: Collection<B>) = this.flatMap { a -> other
 
 // TODO: This is a temporary fix for the UI to show the correct issuer identity, this will break when we start randomizing keys. More work is needed here when the identity work is done.
 fun StateAndRef<Cash.State>.resolveIssuer(): ObservableValue<Party?> = state.data.amount.token.issuer.party.resolveIssuer()
+
 fun AnonymousParty.resolveIssuer(): ObservableValue<Party?> = Models.get(NetworkIdentityModel::class, javaClass.kotlin).lookup(owningKey).map { it?.legalIdentity }

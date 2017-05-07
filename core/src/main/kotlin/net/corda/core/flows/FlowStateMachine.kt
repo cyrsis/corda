@@ -2,6 +2,7 @@ package net.corda.core.flows
 
 import co.paralleluniverse.fibers.Suspendable
 import com.google.common.util.concurrent.ListenableFuture
+import net.corda.core.contracts.ScheduledStateRef
 import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
 import net.corda.core.node.ServiceHub
@@ -12,14 +13,29 @@ import org.slf4j.Logger
 import java.util.*
 
 /**
+ * FlowInitiator holds information on who started the flow. We have different ways of doing that: via RPC [FlowInitiator.RPC],
+ * communication started by peer node [FlowInitiator.Peer], scheduled flows [FlowInitiator.Scheduled]
+ * or via the Corda Shell [FlowInitiator.Shell].
+ */
+@CordaSerializable
+sealed class FlowInitiator {
+    /** Started using [net.corda.core.messaging.CordaRPCOps.startFlowDynamic]. */
+    data class RPC(val username: String) : FlowInitiator()
+    /** Started when we get new session initiation request. */
+    data class Peer(val party: Party) : FlowInitiator()
+    /** Started as scheduled activity. */
+    data class Scheduled(val scheduledState: ScheduledStateRef) : FlowInitiator()
+    object Shell : FlowInitiator() // TODO When proper ssh access enabled, add username/use RPC?
+}
+
+/**
  * A unique identifier for a single state machine run, valid across node restarts. Note that a single run always
  * has at least one flow, but that flow may also invoke sub-flows: they all share the same run id.
  */
 @CordaSerializable
-data class StateMachineRunId private constructor(val uuid: UUID) {
+data class StateMachineRunId(val uuid: UUID) {
     companion object {
         fun createRandom(): StateMachineRunId = StateMachineRunId(UUID.randomUUID())
-        fun wrap(uuid: UUID): StateMachineRunId = StateMachineRunId(uuid)
     }
 
     override fun toString(): String = "[$uuid]"
@@ -31,7 +47,8 @@ interface FlowStateMachine<R> {
     fun <T : Any> sendAndReceive(receiveType: Class<T>,
                                  otherParty: Party,
                                  payload: Any,
-                                 sessionFlow: FlowLogic<*>): UntrustworthyData<T>
+                                 sessionFlow: FlowLogic<*>,
+                                 retrySend: Boolean = false): UntrustworthyData<T>
 
     @Suspendable
     fun <T : Any> receive(receiveType: Class<T>, otherParty: Party, sessionFlow: FlowLogic<*>): UntrustworthyData<T>
@@ -46,4 +63,5 @@ interface FlowStateMachine<R> {
     val logger: Logger
     val id: StateMachineRunId
     val resultFuture: ListenableFuture<R>
+    val flowInitiator: FlowInitiator
 }

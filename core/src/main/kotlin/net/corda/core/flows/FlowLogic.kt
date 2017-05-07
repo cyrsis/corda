@@ -42,11 +42,9 @@ abstract class FlowLogic<out T> {
      */
     val serviceHub: ServiceHub get() = stateMachine.serviceHub
 
-    /**
-     * Return the marker [Class] which [party] has used to register the counterparty flow that is to execute on the
-     * other side. The default implementation returns the class object of this FlowLogic, but any [Class] instance
-     * will do as long as the other side registers with it.
-     */
+    @Deprecated("This is no longer used and will be removed in a future release. If you are using this to communicate " +
+            "with the same party but for two different message streams, then the correct way of doing that is to use sub-flows",
+            level = DeprecationLevel.ERROR)
     open fun getCounterpartyMarker(party: Party): Class<*> = javaClass
 
     /**
@@ -78,6 +76,23 @@ abstract class FlowLogic<out T> {
     @Suspendable
     open fun <R : Any> sendAndReceive(receiveType: Class<R>, otherParty: Party, payload: Any): UntrustworthyData<R> {
         return stateMachine.sendAndReceive(receiveType, otherParty, payload, sessionFlow)
+    }
+
+    /** @see sendAndReceiveWithRetry */
+    internal inline fun <reified R : Any> sendAndReceiveWithRetry(otherParty: Party, payload: Any) = sendAndReceiveWithRetry(R::class.java, otherParty, payload)
+
+    /**
+     * Similar to [sendAndReceive] but also instructs the `payload` to be redelivered until the expected message is received.
+     *
+     * Note that this method should NOT be used for regular party-to-party communication, use [sendAndReceive] instead.
+     * It is only intended for the case where the [otherParty] is running a distributed service with an idempotent
+     * flow which only accepts a single request and sends back a single response – e.g. a notary or certain types of
+     * oracle services. If one or more nodes in the service cluster go down mid-session, the message will be redelivered
+     * to a different one, so there is no need to wait until the initial node comes back up to obtain a response.
+     */
+    @Suspendable
+    internal open fun <R : Any> sendAndReceiveWithRetry(receiveType: Class<R>, otherParty: Party, payload: Any): UntrustworthyData<R> {
+        return stateMachine.sendAndReceive(receiveType, otherParty, payload, sessionFlow, true)
     }
 
     /**
@@ -186,17 +201,20 @@ abstract class FlowLogic<out T> {
         return stateMachine.waitForLedgerCommit(hash, this)
     }
 
-    ////////////////////////////////////////////////////////////////////////////////////////////////////////////
+   ////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
     private var _stateMachine: FlowStateMachine<*>? = null
     /**
-     * Internal only. Reference to the [Fiber] instance that is the top level controller for the entire flow. When
-     * inside a flow this is equivalent to [Strand.currentStrand]. This is public only because it must be accessed
-     * across module boundaries.
+     * @suppress
+     * Internal only. Reference to the [co.paralleluniverse.fibers.Fiber] instance that is the top level controller for
+     * the entire flow. When inside a flow this is equivalent to [co.paralleluniverse.strands.Strand.currentStrand]. This
+     * is public only because it must be accessed across module boundaries.
      */
     var stateMachine: FlowStateMachine<*>
         get() = _stateMachine ?: throw IllegalStateException("This can only be done after the flow has been started.")
-        set(value) { _stateMachine = value }
+        set(value) {
+            _stateMachine = value
+        }
 
     // This points to the outermost flow and is changed when a subflow is invoked.
     private var sessionFlow: FlowLogic<*> = this

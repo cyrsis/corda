@@ -3,6 +3,8 @@ package net.corda.jackson
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
+import com.google.common.collect.HashMultimap
+import com.google.common.collect.Multimap
 import net.corda.jackson.StringToMethodCallParser.ParsedMethodCall
 import org.slf4j.LoggerFactory
 import java.lang.reflect.Constructor
@@ -11,7 +13,7 @@ import java.util.concurrent.Callable
 import javax.annotation.concurrent.ThreadSafe
 import kotlin.reflect.KClass
 import kotlin.reflect.KFunction
-import kotlin.reflect.KotlinReflectionInternalError
+import kotlin.reflect.jvm.internal.KotlinReflectionInternalError
 import kotlin.reflect.jvm.kotlinFunction
 
 /**
@@ -69,20 +71,30 @@ import kotlin.reflect.jvm.kotlinFunction
  *     "addNote id: b6d7e826e8739ab2eb6e077fc4fba9b04fb880bb4cbd09bc618d30234a8827a4, note: Some note"
  */
 @ThreadSafe
-open class StringToMethodCallParser<in T : Any>(targetType: Class<out T>,
-                                                private val om: ObjectMapper = JacksonSupport.createNonRpcMapper(YAMLFactory())) {
+open class StringToMethodCallParser<in T : Any> @JvmOverloads constructor(
+        targetType: Class<out T>,
+        private val om: ObjectMapper = JacksonSupport.createNonRpcMapper(YAMLFactory())) {
     /** Same as the regular constructor but takes a Kotlin reflection [KClass] instead of a Java [Class]. */
     constructor(targetType: KClass<out T>) : this(targetType.java)
 
     companion object {
         @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
         private val ignoredNames = Object::class.java.methods.map { it.name }
-        private fun methodsFromType(clazz: Class<*>) = clazz.methods.map { it.name to it }.toMap().filterKeys { it !in ignoredNames }
+
+        private fun methodsFromType(clazz: Class<*>): Multimap<String, Method> {
+            val result = HashMultimap.create<String, Method>()
+            for ((key, value) in clazz.methods.filterNot { it.isSynthetic && it.name !in ignoredNames }.map { it.name to it }) {
+                result.put(key, value)
+            }
+            return result
+        }
+
         private val log = LoggerFactory.getLogger(StringToMethodCallParser::class.java)!!
     }
 
     /** The methods that can be invoked via this parser. */
-    protected val methodMap = methodsFromType(targetType)
+    protected val methodMap: Multimap<String, Method> = methodsFromType(targetType)
+
     /** A map of method name to parameter names for the target type. */
     val methodParamNames: Map<String, List<String>> = targetType.declaredMethods.mapNotNull {
         try {
@@ -94,14 +106,14 @@ open class StringToMethodCallParser<in T : Any>(targetType: Class<out T>,
         }
     }.toMap()
 
-    inner class ParsedMethodCall(private val target: T?, val methodName: String, val args: Array<Any?>) : Callable<Any?> {
+    inner class ParsedMethodCall(private val target: T?, val method: Method, val args: Array<Any?>) : Callable<Any?> {
         operator fun invoke(): Any? = call()
         override fun call(): Any? {
             if (target == null)
                 throw IllegalStateException("No target object was specified")
             if (log.isDebugEnabled)
-                log.debug("Invoking call $methodName($args)")
-            return methodMap[methodName]!!.invoke(target, *args)
+                log.debug("Invoking call ${method.name}($args)")
+            return method.invoke(target, *args)
         }
     }
 
@@ -113,7 +125,7 @@ open class StringToMethodCallParser<in T : Any>(targetType: Class<out T>,
         return method.parameters.mapIndexed { index, param ->
             when {
                 param.isNamePresent -> param.name
-                // index + 1 because the first Kotlin reflection param is 'this', but that doesn't match Java reflection.
+            // index + 1 because the first Kotlin reflection param is 'this', but that doesn't match Java reflection.
                 kf != null -> kf.parameters[index + 1].name ?: throw UnparseableCallException.ReflectionDataMissing(method.name, index)
                 else -> throw UnparseableCallException.ReflectionDataMissing(method.name, index)
             }
@@ -134,11 +146,12 @@ open class StringToMethodCallParser<in T : Any>(targetType: Class<out T>,
         }
     }
 
-    open class UnparseableCallException(command: String) : Exception("Could not parse as a command: $command") {
+    open class UnparseableCallException(command: String, cause: Throwable? = null) : Exception("Could not parse as a command: $command", cause) {
         class UnknownMethod(val methodName: String) : UnparseableCallException("Unknown command name: $methodName")
         class MissingParameter(methodName: String, val paramName: String, command: String) : UnparseableCallException("Parameter $paramName missing from attempt to invoke $methodName in command: $command")
         class TooManyParameters(methodName: String, command: String) : UnparseableCallException("Too many parameters provided for $methodName: $command")
         class ReflectionDataMissing(methodName: String, argIndex: Int) : UnparseableCallException("Method $methodName missing parameter name at index $argIndex")
+        class FailedParse(e: Exception) : UnparseableCallException(e.message ?: e.toString(), e)
     }
 
     /**
@@ -151,10 +164,22 @@ open class StringToMethodCallParser<in T : Any>(targetType: Class<out T>,
         val spaceIndex = command.indexOf(' ')
         val name = if (spaceIndex != -1) command.substring(0, spaceIndex) else command
         val argStr = if (spaceIndex != -1) command.substring(spaceIndex) else ""
-        val method = methodMap[name] ?: throw UnparseableCallException.UnknownMethod(name)
+        val methods: Collection<Method> = methodMap[name]
+        if (methods.isEmpty())
+            throw UnparseableCallException.UnknownMethod(name)
         log.debug("Parsing call for method {}", name)
-        val args = parseArguments(name, paramNamesFromMethod(method).zip(method.parameterTypes), argStr)
-        return ParsedMethodCall(target, name, args)
+        // Attempt to parse for each method in turn, allowing the exception to leak if we're on the last one
+        // and fail for that too.
+        for ((index, method) in methods.withIndex()) {
+            try {
+                val args = parseArguments(name, paramNamesFromMethod(method).zip(method.parameterTypes), argStr)
+                return ParsedMethodCall(target, method, args)
+            } catch(e: UnparseableCallException) {
+                if (index == methods.size - 1)
+                    throw e
+            }
+        }
+        throw UnparseableCallException("No overloads of the method matched")  // Should be unreachable!
     }
 
     /**
@@ -168,10 +193,14 @@ open class StringToMethodCallParser<in T : Any>(targetType: Class<out T>,
         val parameterString = "{ $args }"
         val tree: JsonNode = om.readTree(parameterString) ?: throw UnparseableCallException(args)
         if (tree.size() > parameters.size) throw UnparseableCallException.TooManyParameters(methodNameHint, args)
-        val inOrderParams: List<Any?> = parameters.mapIndexed { index, param ->
+        val inOrderParams: List<Any?> = parameters.mapIndexed { _, param ->
             val (argName, argType) = param
             val entry = tree[argName] ?: throw UnparseableCallException.MissingParameter(methodNameHint, argName, args)
-            om.readValue(entry.traverse(om), argType)
+            try {
+                om.readValue(entry.traverse(om), argType)
+            } catch(e: Exception) {
+                throw UnparseableCallException.FailedParse(e)
+            }
         }
         if (log.isDebugEnabled) {
             inOrderParams.forEachIndexed { i, param ->
@@ -180,5 +209,19 @@ open class StringToMethodCallParser<in T : Any>(targetType: Class<out T>,
             }
         }
         return inOrderParams.toTypedArray()
+    }
+
+    /** Returns a string-to-string map of commands to a string describing available parameter types. */
+    val availableCommands: Map<String, String> get() {
+        return methodMap.entries().map { entry ->
+            val (name, args) = entry   // TODO: Kotlin 1.1
+            val argStr = if (args.parameterCount == 0) "" else {
+                val paramNames = methodParamNames[name]!!
+                val typeNames = args.parameters.map { it.type.simpleName }
+                val paramTypes = paramNames.zip(typeNames)
+                paramTypes.map { "${it.first}: ${it.second}" }.joinToString(", ")
+            }
+            Pair(name, argStr)
+        }.toMap()
     }
 }

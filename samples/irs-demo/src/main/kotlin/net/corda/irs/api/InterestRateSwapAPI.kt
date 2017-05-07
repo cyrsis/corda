@@ -1,13 +1,14 @@
 package net.corda.irs.api
 
+import net.corda.client.rpc.notUsed
 import net.corda.core.contracts.filterStatesOfType
+import net.corda.core.crypto.Party
 import net.corda.core.getOrThrow
 import net.corda.core.messaging.CordaRPCOps
 import net.corda.core.messaging.startFlow
 import net.corda.core.utilities.loggerFor
 import net.corda.irs.contract.InterestRateSwap
 import net.corda.irs.flows.AutoOfferFlow
-import net.corda.irs.flows.ExitServerFlow
 import net.corda.irs.flows.UpdateBusinessDayFlow
 import java.net.URI
 import java.time.LocalDate
@@ -33,27 +34,28 @@ import javax.ws.rs.core.Response
  * simulate any associated business processing (currently fixing).
  *
  * TODO: replace simulated date advancement with business event based implementation
- *
- * PUT /api/irs/restart - (empty payload) cause the node to restart for API user emergency use in case any servers become unresponsive,
- * or if the demodate or population of deals should be reset (will only work while persistence is disabled).
  */
 @Path("irs")
 class InterestRateSwapAPI(val rpc: CordaRPCOps) {
 
     private val logger = loggerFor<InterestRateSwapAPI>()
 
-    private fun generateDealLink(deal: InterestRateSwap.State) = "/api/irs/deals/" + deal.common.tradeID
+    private fun generateDealLink(deal: InterestRateSwap.State<*>) = "/api/irs/deals/" + deal.common.tradeID
 
-    private fun getDealByRef(ref: String): InterestRateSwap.State? {
-        val states = rpc.vaultAndUpdates().first.filterStatesOfType<InterestRateSwap.State>().filter { it.state.data.ref == ref }
+    private fun getDealByRef(ref: String): InterestRateSwap.State<*>? {
+        val (vault, vaultUpdates) = rpc.vaultAndUpdates()
+        vaultUpdates.notUsed()
+        val states = vault.filterStatesOfType<InterestRateSwap.State<*>>().filter { it.state.data.ref == ref }
         return if (states.isEmpty()) null else {
             val deals = states.map { it.state.data }
             return if (deals.isEmpty()) null else deals[0]
         }
     }
 
-    private fun getAllDeals(): Array<InterestRateSwap.State> {
-        val states = rpc.vaultAndUpdates().first.filterStatesOfType<InterestRateSwap.State>()
+    private fun getAllDeals(): Array<InterestRateSwap.State<*>> {
+        val (vault, vaultUpdates) = rpc.vaultAndUpdates()
+        vaultUpdates.notUsed()
+        val states = vault.filterStatesOfType<InterestRateSwap.State<*>>()
         val swaps = states.map { it.state.data }.toTypedArray()
         return swaps
     }
@@ -61,24 +63,14 @@ class InterestRateSwapAPI(val rpc: CordaRPCOps) {
     @GET
     @Path("deals")
     @Produces(MediaType.APPLICATION_JSON)
-    fun fetchDeals(): Array<InterestRateSwap.State> = getAllDeals()
-
-    // Function needed to substitute party keys in JSON file example-irs-trade.json
-    @GET
-    @Path("partykeys")
-    @Produces(MediaType.APPLICATION_JSON)
-    fun partyFromName(): Response {
-        val keyA = rpc.partyFromName("Bank A")?.owningKey
-        val keyB = rpc.partyFromName("Bank B")?.owningKey
-        return Response.ok().entity(Pair(keyA, keyB)).build()
-    }
+    fun fetchDeals(): Array<InterestRateSwap.State<*>> = getAllDeals()
 
     @POST
     @Path("deals")
     @Consumes(MediaType.APPLICATION_JSON)
-    fun storeDeal(newDeal: InterestRateSwap.State): Response {
+    fun storeDeal(newDeal: InterestRateSwap.State<Party>): Response {
         return try {
-            rpc.startFlow(AutoOfferFlow::Requester, newDeal).returnValue.getOrThrow()
+            rpc.startFlow(AutoOfferFlow::Requester, newDeal.toAnonymous()).returnValue.getOrThrow()
             Response.created(URI.create(generateDealLink(newDeal))).build()
         } catch (ex: Throwable) {
             logger.info("Exception when creating deal: $ex")
@@ -105,6 +97,8 @@ class InterestRateSwapAPI(val rpc: CordaRPCOps) {
         val priorDemoDate = fetchDemoDate()
         // Can only move date forwards
         if (newDemoDate.isAfter(priorDemoDate)) {
+            // TODO: Remove this suppress when we upgrade to kotlin 1.1 or when JetBrain fixes the bug.
+            @Suppress("UNSUPPORTED_FEATURE")
             rpc.startFlow(UpdateBusinessDayFlow::Broadcast, newDemoDate).returnValue.getOrThrow()
             return Response.ok().build()
         }
@@ -118,13 +112,5 @@ class InterestRateSwapAPI(val rpc: CordaRPCOps) {
     @Produces(MediaType.APPLICATION_JSON)
     fun fetchDemoDate(): LocalDate {
         return LocalDateTime.ofInstant(rpc.currentNodeTime(), ZoneId.systemDefault()).toLocalDate()
-    }
-
-    @PUT
-    @Path("restart")
-    @Consumes(MediaType.APPLICATION_JSON)
-    fun exitServer(): Response {
-        rpc.startFlow(ExitServerFlow::Broadcast, 83).returnValue.getOrThrow()
-        return Response.ok().build()
     }
 }

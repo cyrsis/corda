@@ -121,7 +121,7 @@ each side.
           data class SellerTradeInfo(
                   val assetForSale: StateAndRef<OwnableState>,
                   val price: Amount<Currency>,
-                  val sellerOwnerKey: CompositeKey
+                  val sellerOwnerKey: PublicKey
           )
 
           data class SignaturesFromSeller(val sellerSig: DigitalSignature.WithKey,
@@ -156,7 +156,7 @@ simply flow messages or exceptions. The other two represent the buyer and seller
 Going through the data needed to become a seller, we have:
 
 - ``otherParty: Party`` - the party with which you are trading.
-- ``notaryNode: NodeInfo`` - the entry in the network map for the chosen notary. See ":doc:`consensus`" for more
+- ``notaryNode: NodeInfo`` - the entry in the network map for the chosen notary. See ":doc:`key-concepts-consensus-notaries`" for more
   information on notaries.
 - ``assetToSell: StateAndRef<OwnableState>`` - a pointer to the ledger entry that represents the thing being sold.
 - ``price: Amount<Currency>`` - the agreed on price that the asset is being sold for (without an issuer constraint).
@@ -215,24 +215,30 @@ Java reflection ``Class`` object that describes the flow class to use (in this c
 It also takes a set of arguments to pass to the constructor. Because it's possible for flow invocations to
 be requested by untrusted code (e.g. a state that you have been sent), the types that can be passed into the
 flow are checked against a whitelist, which can be extended by apps themselves at load time.  There are also a series
-of inlined extension functions of the form ``CordaRPCOps.startFlow`` which help with invoking flows in a type
+of inlined Kotlin extension functions of the form ``CordaRPCOps.startFlow`` which help with invoking flows in a type
 safe manner.
 
-The process of starting a flow returns a ``FlowHandle`` that you can use to either observe
-the result, observe its progress and which also contains a permanent identifier for the invoked flow in the form
-of the ``StateMachineRunId``.
+The process of starting a flow returns a ``FlowHandle`` that you can use to observe the result, and which also contains
+a permanent identifier for the invoked flow in the form of the ``StateMachineRunId``. Should you also wish to track the
+progress of your flow (see :ref:`progress-tracking`) then you can invoke your flow instead using
+``CordaRPCOps.startTrackedFlowDynamic`` or any of its corresponding ``CordaRPCOps.startTrackedFlow`` extension functions.
+These will return a ``FlowProgressHandle``, which is just like a ``FlowHandle`` except that it also contains an observable
+``progress`` field.
 
-In a two party flow only one side is to be manually started using ``CordaRPCOps.startFlow``. The other side
-has to be registered by its node to respond to the initiating flow via ``PluginServiceHub.registerFlowInitiator``.
-In our example it doesn't matter which flow is the initiator and which is the initiated. For example, if we are to
-take the seller as the initiator then we would register the buyer as such:
+.. note:: The developer `must` then either subscribe to this ``progress`` observable or invoke the ``notUsed()`` extension
+function for it. Otherwise the unused observable will waste resources back in the node.
+
+In a two party flow only one side is to be manually started using ``CordaRPCOps.startFlow``. The other side has to be
+registered by its node to respond to the initiating flow via ``PluginServiceHub.registerServiceFlow``. In our example it
+doesn't matter which flow is the initiator (i.e. client) and which is the initiated (i.e. service). For example, if we
+are to take the seller as the initiator then we would register the buyer as such:
 
 .. container:: codeset
 
    .. sourcecode:: kotlin
 
       val services: PluginServiceHub = TODO()
-      services.registerFlowInitiator(Seller::class) { otherParty ->
+      services.registerServiceFlow(Seller::class.java) { otherParty ->
         val notary = services.networkMapCache.notaryNodes[0]
         val acceptablePrice = TODO()
         val typeToBuy = TODO()
@@ -413,8 +419,7 @@ This code is longer but no more complicated. Here are some things to pay attenti
 As you can see, the flow logic is straightforward and does not contain any callbacks or network glue code, despite
 the fact that it takes minimal resources and can survive node restarts.
 
-.. warning:: In the current version of the platform, exceptions thrown during flow execution are not propagated
-   back to the sender. A thorough error handling and exceptions framework will be in a future version of the platform.
+.. _progress-tracking:
 
 Progress tracking
 -----------------
@@ -530,10 +535,8 @@ Future features
 The flow framework is a key part of the platform and will be extended in major ways in future. Here are some of
 the features we have planned:
 
-* Identity based addressing
 * Exception management, with a "flow hospital" tool to manually provide solutions to unavoidable
   problems (e.g. the other side doesn't know the trade)
-* Being able to interact with internal apps and tools via RPC
 * Being able to interact with people, either via some sort of external ticketing system, or email, or a custom UI.
   For example to implement human transaction authorisations.
 * A standard library of flows that can be easily sub-classed by local developers in order to integrate internal

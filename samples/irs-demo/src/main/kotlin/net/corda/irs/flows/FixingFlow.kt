@@ -3,8 +3,9 @@ package net.corda.irs.flows
 import co.paralleluniverse.fibers.Suspendable
 import net.corda.core.TransientProperty
 import net.corda.core.contracts.*
-import net.corda.core.crypto.CompositeKey
 import net.corda.core.crypto.Party
+import net.corda.core.crypto.keys
+import net.corda.core.crypto.toBase58String
 import net.corda.core.flows.FlowLogic
 import net.corda.core.node.NodeInfo
 import net.corda.core.node.PluginServiceHub
@@ -17,12 +18,13 @@ import net.corda.core.utilities.trace
 import net.corda.flows.TwoPartyDealFlow
 import java.math.BigDecimal
 import java.security.KeyPair
+import java.security.PublicKey
 
 object FixingFlow {
 
     class Service(services: PluginServiceHub) {
         init {
-            services.registerFlowInitiator(Floater::class.java) { Fixer(it) }
+            services.registerServiceFlow(Floater::class.java) { Fixer(it) }
         }
     }
 
@@ -54,7 +56,7 @@ object FixingFlow {
         }
 
         @Suspendable
-        override fun assembleSharedTX(handshake: TwoPartyDealFlow.Handshake<FixingSession>): Pair<TransactionBuilder, List<CompositeKey>> {
+        override fun assembleSharedTX(handshake: TwoPartyDealFlow.Handshake<FixingSession>): Pair<TransactionBuilder, List<PublicKey>> {
             @Suppress("UNCHECKED_CAST")
             val fixOf = deal.nextFixingOf()!!
 
@@ -111,8 +113,8 @@ object FixingFlow {
         }
 
         override val myKeyPair: KeyPair get() {
-            val myCompositeKey = serviceHub.myInfo.legalIdentity.owningKey
-            val myKeys = dealToFix.state.data.parties.filter { it.owningKey == myCompositeKey }.single().owningKey.keys
+            val myPublicKey = serviceHub.myInfo.legalIdentity.owningKey
+            val myKeys = dealToFix.state.data.parties.filter { it.owningKey == myPublicKey }.single().owningKey.keys
             return serviceHub.keyManagementService.toKeyPair(myKeys)
         }
 
@@ -135,11 +137,11 @@ object FixingFlow {
      * TODO: Replace [FixingSession] and [FixingSessionInitiationHandler] with generic session initiation logic once it exists.
      */
     class FixingRoleDecider(val ref: StateRef, override val progressTracker: ProgressTracker) : FlowLogic<Unit>() {
-        @Suppress("unused")  // Used via reflection.
+        @Suppress("unused") // Used via reflection.
         constructor(ref: StateRef) : this(ref, tracker())
 
         companion object {
-            class LOADING() : ProgressTracker.Step("Loading state to decide fixing role")
+            class LOADING : ProgressTracker.Step("Loading state to decide fixing role")
 
             fun tracker() = ProgressTracker(LOADING())
         }

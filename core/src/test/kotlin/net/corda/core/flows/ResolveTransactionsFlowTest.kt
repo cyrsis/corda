@@ -5,12 +5,11 @@ import net.corda.core.crypto.NullSignature
 import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
 import net.corda.core.getOrThrow
-import net.corda.core.node.recordTransactions
 import net.corda.core.serialization.opaque
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.utilities.DUMMY_NOTARY_KEY
 import net.corda.flows.ResolveTransactionsFlow
-import net.corda.node.utilities.databaseTransaction
+import net.corda.node.utilities.transaction
 import net.corda.testing.MEGA_CORP
 import net.corda.testing.MEGA_CORP_KEY
 import net.corda.testing.MINI_CORP_PUBKEY
@@ -18,7 +17,11 @@ import net.corda.testing.node.MockNetwork
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.security.SignatureException
+import java.util.jar.JarEntry
+import java.util.jar.JarOutputStream
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
@@ -54,7 +57,7 @@ class ResolveTransactionsFlowTest {
         net.runNetwork()
         val results = future.getOrThrow()
         assertEquals(listOf(stx1.id, stx2.id), results.map { it.id })
-        databaseTransaction(b.database) {
+        b.database.transaction {
             assertEquals(stx1, b.storage.validatedTransactions.getTransaction(stx1.id))
             assertEquals(stx2, b.storage.validatedTransactions.getTransaction(stx2.id))
         }
@@ -77,7 +80,7 @@ class ResolveTransactionsFlowTest {
         val future = b.services.startFlow(p).resultFuture
         net.runNetwork()
         future.getOrThrow()
-        databaseTransaction(b.database) {
+        b.database.transaction {
             assertEquals(stx1, b.storage.validatedTransactions.getTransaction(stx1.id))
             // But stx2 wasn't inserted, just stx1.
             assertNull(b.storage.validatedTransactions.getTransaction(stx2.id))
@@ -94,7 +97,7 @@ class ResolveTransactionsFlowTest {
             val stx = DummyContract.move(cursor.tx.outRef(0), MINI_CORP_PUBKEY)
                     .addSignatureUnchecked(NullSignature)
                     .toSignedTransaction(false)
-            databaseTransaction(a.database) {
+            a.database.transaction {
                 a.services.recordTransactions(stx)
             }
             cursor = stx
@@ -122,7 +125,7 @@ class ResolveTransactionsFlowTest {
             toSignedTransaction()
         }
 
-        databaseTransaction(a.database) {
+        a.database.transaction {
             a.services.recordTransactions(stx2, stx3)
         }
 
@@ -134,9 +137,18 @@ class ResolveTransactionsFlowTest {
 
     @Test
     fun attachment() {
+        fun makeJar(): InputStream {
+            val bs = ByteArrayOutputStream()
+            val jar = JarOutputStream(bs)
+            jar.putNextEntry(JarEntry("TEST"))
+            jar.write("Some test file".toByteArray())
+            jar.closeEntry()
+            jar.close()
+            return bs.toByteArray().opaque().open()
+        }
         // TODO: this operation should not require an explicit transaction
-        val id = databaseTransaction(a.database) {
-            a.services.storageService.attachments.importAttachment("Some test file".toByteArray().opaque().open())
+        val id = a.database.transaction {
+            a.services.storageService.attachments.importAttachment(makeJar())
         }
         val stx2 = makeTransactions(withAttachment = id).second
         val p = ResolveTransactionsFlow(stx2, a.info.legalIdentity)
@@ -145,7 +157,7 @@ class ResolveTransactionsFlowTest {
         future.getOrThrow()
 
         // TODO: this operation should not require an explicit transaction
-        databaseTransaction(b.database) {
+        b.database.transaction {
             assertNotNull(b.services.storageService.attachments.openAttachment(id))
         }
     }
@@ -166,7 +178,7 @@ class ResolveTransactionsFlowTest {
             it.signWith(DUMMY_NOTARY_KEY)
             it.toSignedTransaction()
         }
-        databaseTransaction(a.database) {
+        a.database.transaction {
             a.services.recordTransactions(dummy1, dummy2)
         }
         return Pair(dummy1, dummy2)

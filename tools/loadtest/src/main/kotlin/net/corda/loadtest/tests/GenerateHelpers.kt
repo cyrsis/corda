@@ -5,7 +5,7 @@ import net.corda.client.mock.generateAmount
 import net.corda.client.mock.pickOne
 import net.corda.core.contracts.Issued
 import net.corda.core.contracts.PartyAndReference
-import net.corda.core.crypto.AnonymousParty
+import net.corda.core.contracts.withoutIssuer
 import net.corda.core.crypto.Party
 import net.corda.core.serialization.OpaqueBytes
 import net.corda.flows.CashFlowCommand
@@ -17,7 +17,7 @@ fun generateIssue(
         notary: Party,
         possibleRecipients: List<Party>
 ): Generator<CashFlowCommand.IssueCash> {
-    return generateAmount(0, max, Generator.pure(currency)).combine(
+    return generateAmount(1, max, Generator.pure(currency)).combine(
             Generator.pure(OpaqueBytes.of(0)),
             Generator.pickOne(possibleRecipients)
     ) { amount, ref, recipient ->
@@ -28,13 +28,13 @@ fun generateIssue(
 fun generateMove(
         max: Long,
         currency: Currency,
-        issuer: AnonymousParty,
+        issuer: Party,
         possibleRecipients: List<Party>
 ): Generator<CashFlowCommand.PayCash> {
     return generateAmount(1, max, Generator.pure(Issued(PartyAndReference(issuer, OpaqueBytes.of(0)), currency))).combine(
             Generator.pickOne(possibleRecipients)
     ) { amount, recipient ->
-        CashFlowCommand.PayCash(amount, recipient)
+        CashFlowCommand.PayCash(amount.withoutIssuer(), recipient, issuer)
     }
 }
 

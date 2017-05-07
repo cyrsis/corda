@@ -1,6 +1,8 @@
 package net.corda.core.crypto
 
 import net.corda.core.div
+import net.corda.testing.MEGA_CORP
+import net.corda.testing.getTestX509Name
 import org.bouncycastle.asn1.x500.X500Name
 import org.bouncycastle.asn1.x509.GeneralName
 import org.junit.Rule
@@ -30,7 +32,7 @@ class X509UtilitiesTest {
 
     @Test
     fun `create valid self-signed CA certificate`() {
-        val caCertAndKey = X509Utilities.createSelfSignedCACert("Test Cert")
+        val caCertAndKey = X509Utilities.createSelfSignedCACert(getTestX509Name("Test Cert"))
         assertTrue { caCertAndKey.certificate.subjectDN.name.contains("CN=Test Cert") } // using our subject common name
         assertEquals(caCertAndKey.certificate.issuerDN, caCertAndKey.certificate.subjectDN) //self-signed
         caCertAndKey.certificate.checkValidity(Date()) // throws on verification problems
@@ -42,7 +44,7 @@ class X509UtilitiesTest {
     @Test
     fun `load and save a PEM file certificate`() {
         val tmpCertificateFile = tempFile("cacert.pem")
-        val caCertAndKey = X509Utilities.createSelfSignedCACert("Test Cert")
+        val caCertAndKey = X509Utilities.createSelfSignedCACert(getTestX509Name("Test Cert"))
         X509Utilities.saveCertificateAsPEMFile(caCertAndKey.certificate, tmpCertificateFile)
         val readCertificate = X509Utilities.loadCertificateFromPEMFile(tmpCertificateFile)
         assertEquals(caCertAndKey.certificate, readCertificate)
@@ -50,8 +52,8 @@ class X509UtilitiesTest {
 
     @Test
     fun `create valid server certificate chain`() {
-        val caCertAndKey = X509Utilities.createSelfSignedCACert("Test CA Cert")
-        val subjectDN = X509Utilities.getDevX509Name("Server Cert")
+        val caCertAndKey = X509Utilities.createSelfSignedCACert(getTestX509Name("Test CA Cert"))
+        val subjectDN = getTestX509Name("Server Cert")
         val keyPair = X509Utilities.generateECDSAKeyPairForSSL()
         val serverCert = X509Utilities.createServerCert(subjectDN, keyPair.public, caCertAndKey, listOf("alias name"), listOf("10.0.0.54"))
         assertTrue { serverCert.subjectDN.name.contains("CN=Server Cert") } // using our subject common name
@@ -59,7 +61,7 @@ class X509UtilitiesTest {
         serverCert.checkValidity(Date()) // throws on verification problems
         serverCert.verify(caCertAndKey.keyPair.public) // throws on verification problems
         assertFalse { serverCert.keyUsage[5] } // Bit 5 == keyCertSign according to ASN.1 spec (see full comment on KeyUsage property)
-        assertTrue { serverCert.basicConstraints === -1 } // This returns the signing path length should be -1 for non-CA certificate
+        assertTrue { serverCert.basicConstraints == -1 } // This returns the signing path length should be -1 for non-CA certificate
         assertEquals(2, serverCert.subjectAlternativeNames.size)
         var foundAliasDnsName = false
         for (entry in serverCert.subjectAlternativeNames) {
@@ -68,7 +70,7 @@ class X509UtilitiesTest {
             if (typeId == GeneralName.iPAddress) {
                 assertEquals("10.0.0.54", value)
             } else if (value == "alias name") {
-                    foundAliasDnsName = true
+                foundAliasDnsName = true
             }
         }
         assertTrue(foundAliasDnsName)
@@ -138,7 +140,7 @@ class X509UtilitiesTest {
         val caCertAndKey = X509Utilities.loadCertificateAndKey(caKeyStore, "cakeypass", X509Utilities.CORDA_INTERMEDIATE_CA_PRIVATE_KEY)
 
         // Generate server cert and private key and populate another keystore suitable for SSL
-        X509Utilities.createKeystoreForSSL(tmpServerKeyStore, "serverstorepass", "serverkeypass", caKeyStore, "cakeypass", "Mega Corp.")
+        X509Utilities.createKeystoreForSSL(tmpServerKeyStore, "serverstorepass", "serverkeypass", caKeyStore, "cakeypass", MEGA_CORP.name)
 
         // Load back server certificate
         val serverKeyStore = X509Utilities.loadKeyStore(tmpServerKeyStore, "serverstorepass")
@@ -147,7 +149,7 @@ class X509UtilitiesTest {
         serverCertAndKey.certificate.checkValidity(Date())
         serverCertAndKey.certificate.verify(caCertAndKey.certificate.publicKey)
 
-        assertTrue { serverCertAndKey.certificate.subjectDN.name.contains("CN=Mega Corp.") }
+        assertTrue { serverCertAndKey.certificate.subjectDN.name.contains(MEGA_CORP.name.commonName) }
 
         // Now sign something with private key and verify against certificate public key
         val testData = "123456".toByteArray()
@@ -175,7 +177,7 @@ class X509UtilitiesTest {
                 "trustpass")
 
         // Generate server cert and private key and populate another keystore suitable for SSL
-        val keyStore = X509Utilities.createKeystoreForSSL(tmpServerKeyStore, "serverstorepass", "serverstorepass", caKeyStore, "cakeypass", "Mega Corp.")
+        val keyStore = X509Utilities.createKeystoreForSSL(tmpServerKeyStore, "serverstorepass", "serverstorepass", caKeyStore, "cakeypass", MEGA_CORP.name)
         val trustStore = X509Utilities.loadKeyStore(tmpTrustStore, "trustpass")
 
         val context = SSLContext.getInstance("TLS")
@@ -224,10 +226,10 @@ class X509UtilitiesTest {
         var done = false
         var serverError = false
 
-        val serverThread = thread() {
+        val serverThread = thread {
             try {
                 val sslServerSocket = serverSocket.accept()
-                assert(sslServerSocket.isConnected)
+                assertTrue(sslServerSocket.isConnected)
                 val serverInput = DataInputStream(sslServerSocket.inputStream)
                 val receivedString = serverInput.readUTF()
                 assertEquals("Hello World", receivedString)
@@ -248,7 +250,7 @@ class X509UtilitiesTest {
         val peerChain = clientSocket.session.peerCertificates
         val peerX500Principal = (peerChain[0] as X509Certificate).subjectX500Principal
         val x500name = X500Name(peerX500Principal.name)
-        assertEquals("Mega Corp.", x500name.commonName)
+        assertEquals(MEGA_CORP.name, x500name)
 
 
         val output = DataOutputStream(clientSocket.outputStream)

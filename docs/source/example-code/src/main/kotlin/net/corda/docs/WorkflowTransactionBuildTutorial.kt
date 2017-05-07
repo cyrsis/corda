@@ -17,7 +17,7 @@ import java.time.Duration
 object WorkflowTransactionBuildTutorial {
     // Would normally be called by custom service init in a CorDapp
     fun registerWorkflowProtocols(pluginHub: PluginServiceHub) {
-        pluginHub.registerFlowInitiator(SubmitCompletionFlow::class.java, ::RecordCompletionFlow)
+        pluginHub.registerServiceFlow(SubmitCompletionFlow::class.java, ::RecordCompletionFlow)
     }
 }
 
@@ -62,7 +62,7 @@ data class TradeApprovalContract(override val legalContractReference: SecureHash
                      override val contract: TradeApprovalContract = TradeApprovalContract()) : LinearState {
 
         val parties: List<Party> get() = listOf(source, counterparty)
-        override val participants: List<CompositeKey> get() = parties.map { it.owningKey }
+        override val participants: List<PublicKey> get() = parties.map { it.owningKey }
 
         override fun isRelevant(ourKeys: Set<PublicKey>): Boolean {
             return participants.any { it.containsAny(ourKeys) }
@@ -79,13 +79,13 @@ data class TradeApprovalContract(override val legalContractReference: SecureHash
         when (command.value) {
             is Commands.Issue -> {
                 requireThat {
-                    "Issue of new WorkflowContract must not include any inputs" by (tx.inputs.isEmpty())
-                    "Issue of new WorkflowContract must be in a unique transaction" by (tx.outputs.size == 1)
+                    "Issue of new WorkflowContract must not include any inputs" using (tx.inputs.isEmpty())
+                    "Issue of new WorkflowContract must be in a unique transaction" using (tx.outputs.size == 1)
                 }
                 val issued = tx.outputs.get(0) as TradeApprovalContract.State
                 requireThat {
-                    "Issue requires the source Party as signer" by (command.signers.contains(issued.source.owningKey))
-                    "Initial Issue state must be NEW" by (issued.state == WorkflowState.NEW)
+                    "Issue requires the source Party as signer" using (command.signers.contains(issued.source.owningKey))
+                    "Initial Issue state must be NEW" using (issued.state == WorkflowState.NEW)
                 }
             }
             is Commands.Completed -> {
@@ -95,11 +95,11 @@ data class TradeApprovalContract(override val legalContractReference: SecureHash
                     val before = group.inputs.single()
                     val after = group.outputs.single()
                     requireThat {
-                        "Only a non-final trade can be modified" by (before.state == WorkflowState.NEW)
-                        "Output must be a final state" by (after.state in setOf(WorkflowState.APPROVED, WorkflowState.REJECTED))
-                        "Completed command can only change state" by (before == after.copy(state = before.state))
-                        "Completed command requires the source Party as signer" by (command.signers.contains(before.source.owningKey))
-                        "Completed command requires the counterparty as signer" by (command.signers.contains(before.counterparty.owningKey))
+                        "Only a non-final trade can be modified" using (before.state == WorkflowState.NEW)
+                        "Output must be a final state" using (after.state in setOf(WorkflowState.APPROVED, WorkflowState.REJECTED))
+                        "Completed command can only change state" using (before == after.copy(state = before.state))
+                        "Completed command requires the source Party as signer" using (command.signers.contains(before.source.owningKey))
+                        "Completed command requires the counterparty as signer" using (command.signers.contains(before.counterparty.owningKey))
                     }
                 }
             }
@@ -250,7 +250,7 @@ class RecordCompletionFlow(val source: Party) : FlowLogic<Unit>() {
         }
         // DOCEND 3
         // Having verified the SignedTransaction passed to us we can sign it too
-        val ourSignature = serviceHub.legalIdentityKey.signWithECDSA(completeTx.tx.id)
+        val ourSignature = serviceHub.legalIdentityKey.sign(completeTx.tx.id)
         // Send our signature to the other party.
         send(source, ourSignature)
         // N.B. The FinalityProtocol will be responsible for Notarising the SignedTransaction

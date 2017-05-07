@@ -21,12 +21,6 @@ configurations {
 }
 
 sourceSets {
-    main {
-        resources {
-            srcDir "../../../config/dev"
-        }
-    }
-
     integrationTest {
         kotlin {
             compileClasspath += main.output + test.output
@@ -40,7 +34,8 @@ compileTestJava.dependsOn tasks.getByPath(':node:capsule:buildCordaJAR')
 
 dependencies {
     compile project(':core')
-    compile project(':client')
+    compile project(':client:jfx')
+    compile project(':node')
     testCompile project(':test-utils')
 
     compile "org.graphstream:gs-core:1.3"
@@ -49,7 +44,7 @@ dependencies {
     }
 
     runtime project(path: ":node:capsule", configuration: 'runtimeArtifacts')
-    runtime project(path: ":node:webserver:webcapsule", configuration: 'runtimeArtifacts')
+    runtime project(path: ":webserver:webcapsule", configuration: 'runtimeArtifacts')
 }
 
 mainClassName = "net.corda.docs.ClientRpcTutorialKt"
@@ -73,26 +68,28 @@ task integrationTest(type: Test) {
     classpath = sourceSets.integrationTest.runtimeClasspath
 }
 
-task deployNodes(type: net.corda.plugins.Cordform, dependsOn: ['build']) {
+task deployNodes(type: net.corda.plugins.Cordform, dependsOn: ['jar']) {
     directory "./build/nodes"
-    networkMap "Notary"
+    networkMap "CN=Notary Service,O=R3,OU=corda,L=London,C=UK"
     node {
-        name "Notary"
+        name "CN=Notary Service,O=R3,OU=corda,L=London,C=UK"
         nearestCity "London"
         advertisedServices = ["corda.notary.validating"]
-        artemisPort 10002
-        webPort 10003
+        p2pPort 10002
+        rpcPort 10003
+        webPort 10004
         cordapps = []
     }
     node {
-        name "Alice"
+        name "CN=Alice Corp,O=Alice Corp,L=London,C=UK"
         nearestCity "London"
         advertisedServices = []
-        artemisPort 10004
-        webPort 10005
+        p2pPort 10005
+        rpcPort 10006
+        webPort 10007
         cordapps = []
         rpcUsers = [
-                ['user' : "user",
+                ['username' : "user",
                  'password' : "password",
                  'permissions' : ["StartFlow.net.corda.flows.CashFlow"]]
         ]

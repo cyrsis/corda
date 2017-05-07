@@ -3,13 +3,13 @@ package net.corda.core.transactions
 import net.corda.core.contracts.*
 import net.corda.core.crypto.*
 import net.corda.core.serialization.CordaSerializable
-import net.corda.core.serialization.createKryo
-import net.corda.core.serialization.extendKryoHash
+import net.corda.core.serialization.p2PKryo
 import net.corda.core.serialization.serialize
+import java.security.PublicKey
+import net.corda.core.serialization.withoutReferences
 
 fun <T : Any> serializedHash(x: T): SecureHash {
-    val kryo = extendKryoHash(createKryo()) // Dealing with HashMaps inside states.
-    return x.serialize(kryo).hash
+    return p2PKryo().run { kryo -> kryo.withoutReferences { x.serialize(kryo).hash } }
 }
 
 /**
@@ -27,7 +27,7 @@ interface TraversableTransaction {
     val outputs: List<TransactionState<ContractState>>
     val commands: List<Command>
     val notary: Party?
-    val mustSign: List<CompositeKey>
+    val mustSign: List<PublicKey>
     val type: TransactionType?
     val timestamp: Timestamp?
 
@@ -75,7 +75,7 @@ class FilteredLeaves(
         override val outputs: List<TransactionState<ContractState>>,
         override val commands: List<Command>,
         override val notary: Party?,
-        override val mustSign: List<CompositeKey>,
+        override val mustSign: List<PublicKey>,
         override val type: TransactionType?,
         override val timestamp: Timestamp?
 ) : TraversableTransaction {

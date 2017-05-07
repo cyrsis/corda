@@ -61,7 +61,7 @@ object NotaryFlow {
             }
 
             val response = try {
-                sendAndReceive<List<DigitalSignature.WithKey>>(notaryParty, payload)
+                sendAndReceiveWithRetry<List<DigitalSignature.WithKey>>(notaryParty, payload)
             } catch (e: NotaryException) {
                 if (e.error is NotaryError.Conflict) {
                     e.error.conflict.verified()
@@ -77,7 +77,7 @@ object NotaryFlow {
 
         private fun validateSignature(sig: DigitalSignature.WithKey, data: ByteArray) {
             check(sig.by in notaryParty.owningKey.keys) { "Invalid signer for the notary result" }
-            sig.verifyWithECDSA(data)
+            sig.verify(data)
         }
     }
 
@@ -117,7 +117,7 @@ object NotaryFlow {
 
         private fun validateTimestamp(t: Timestamp?) {
             if (t != null && !timestampChecker.isValid(t))
-                throw NotaryException(NotaryError.TimestampInvalid())
+                throw NotaryException(NotaryError.TimestampInvalid)
         }
 
         /**
@@ -134,6 +134,7 @@ object NotaryFlow {
                 }
                 if (conflicts.isNotEmpty()) {
                     // TODO: Create a new UniquenessException that only contains the conflicts filtered above.
+                    logger.warn("Notary conflicts for $txId: $conflicts")
                     throw notaryException(txId, e)
                 }
             }
@@ -141,7 +142,7 @@ object NotaryFlow {
 
         private fun sign(bits: ByteArray): DigitalSignature.WithKey {
             val mySigningKey = serviceHub.notaryIdentityKey
-            return mySigningKey.signWithECDSA(bits)
+            return mySigningKey.sign(bits)
         }
 
         private fun notaryException(txId: SecureHash, e: UniquenessException): NotaryException {
@@ -158,23 +159,21 @@ object NotaryFlow {
  */
 data class TransactionParts(val id: SecureHash, val inputs: List<StateRef>, val timestamp: Timestamp?)
 
-class NotaryException(val error: NotaryError) : FlowException() {
-    override fun toString() = "${super.toString()}: Error response from Notary - $error"
-}
+class NotaryException(val error: NotaryError) : FlowException("Error response from Notary - $error")
 
 @CordaSerializable
 sealed class NotaryError {
-    class Conflict(val txId: SecureHash, val conflict: SignedData<UniquenessProvider.Conflict>) : NotaryError() {
+    data class Conflict(val txId: SecureHash, val conflict: SignedData<UniquenessProvider.Conflict>) : NotaryError() {
         override fun toString() = "One or more input states for transaction $txId have been used in another transaction"
     }
 
     /** Thrown if the time specified in the timestamp command is outside the allowed tolerance */
-    class TimestampInvalid : NotaryError()
+    object TimestampInvalid : NotaryError()
 
-    class TransactionInvalid(val msg: String) : NotaryError()
-    class SignaturesInvalid(val msg: String) : NotaryError()
+    data class TransactionInvalid(val msg: String) : NotaryError()
+    data class SignaturesInvalid(val msg: String) : NotaryError()
 
-    class SignaturesMissing(val cause: SignedTransaction.SignaturesMissingException) : NotaryError() {
+    data class SignaturesMissing(val cause: SignedTransaction.SignaturesMissingException) : NotaryError() {
         override fun toString() = cause.toString()
     }
 }

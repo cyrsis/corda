@@ -8,7 +8,7 @@ import net.corda.core.contracts.currency
 import net.corda.core.createDirectories
 import net.corda.core.div
 import net.corda.core.exists
-import tornadofx.Component
+import tornadofx.*
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -30,9 +30,6 @@ class SettingsModel(path: Path = Paths.get("conf")) : Component(), Observable {
     private var username: String by config
     private var reportingCurrency: Currency by config
     private var fullscreen: Boolean by config
-    private var certificatesDir: Path by config
-    private var keyStorePassword: String by config
-    private var trustStorePassword: String by config
 
     // Create observable Properties.
     val reportingCurrencyProperty = writableConfigProperty(SettingsModel::reportingCurrency)
@@ -41,10 +38,6 @@ class SettingsModel(path: Path = Paths.get("conf")) : Component(), Observable {
     val portProperty = writableConfigProperty(SettingsModel::port)
     val usernameProperty = writableConfigProperty(SettingsModel::username)
     val fullscreenProperty = writableConfigProperty(SettingsModel::fullscreen)
-    val certificatesDirProperty = writableConfigProperty(SettingsModel::certificatesDir)
-    // TODO : We should encrypt all passwords in config file.
-    val keyStorePasswordProperty = writableConfigProperty(SettingsModel::keyStorePassword)
-    val trustStorePasswordProperty = writableConfigProperty(SettingsModel::trustStorePassword)
 
     init {
         load()

@@ -17,12 +17,13 @@ import javafx.scene.text.Font
 import javafx.scene.text.TextAlignment
 import javafx.stage.Stage
 import javafx.stage.WindowEvent
-import net.corda.client.fxutils.ChosenList
-import net.corda.client.fxutils.map
-import net.corda.client.model.NetworkIdentityModel
-import net.corda.client.model.objectProperty
-import net.corda.client.model.observableList
-import net.corda.client.model.observableValue
+import net.corda.client.jfx.model.NetworkIdentityModel
+import net.corda.client.jfx.model.objectProperty
+import net.corda.client.jfx.model.observableList
+import net.corda.client.jfx.model.observableValue
+import net.corda.client.jfx.utils.ChosenList
+import net.corda.client.jfx.utils.map
+import net.corda.explorer.formatters.PartyNameFormatter
 import net.corda.explorer.model.CordaViewModel
 import tornadofx.*
 
@@ -49,7 +50,7 @@ class MainView : View() {
 
     init {
         // Header
-        userButton.textProperty().bind(myIdentity.map { it?.legalIdentity?.name })
+        userButton.textProperty().bind(myIdentity.map { it?.legalIdentity?.let { PartyNameFormatter.short.format(it.name) } })
         exit.setOnAction {
             (root.scene.window as Stage).fireEvent(WindowEvent(root.scene.window, WindowEvent.WINDOW_CLOSE_REQUEST))
         }

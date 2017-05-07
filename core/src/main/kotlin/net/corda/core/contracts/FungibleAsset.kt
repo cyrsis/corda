@@ -1,11 +1,14 @@
 package net.corda.core.contracts
 
-import net.corda.core.crypto.CompositeKey
+import net.corda.core.crypto.Party
 import net.corda.core.flows.FlowException
+import net.corda.core.transactions.TransactionBuilder
+import net.corda.core.utilities.loggerFor
+import net.corda.core.utilities.trace
+import java.security.PublicKey
+import java.util.*
 
-class InsufficientBalanceException(val amountMissing: Amount<*>) : FlowException() {
-    override fun toString() = "Insufficient balance, missing $amountMissing"
-}
+class InsufficientBalanceException(val amountMissing: Amount<*>) : FlowException("Insufficient balance, missing $amountMissing")
 
 /**
  * Interface for contract states representing assets which are fungible, countable and issued by a
@@ -21,17 +24,17 @@ class InsufficientBalanceException(val amountMissing: Amount<*>) : FlowException
  * @param T a type that represents the asset in question. This should describe the basic type of the asset
  * (GBP, USD, oil, shares in company <X>, etc.) and any additional metadata (issuer, grade, class, etc.).
  */
-interface FungibleAsset<T> : OwnableState {
+interface FungibleAsset<T : Any> : OwnableState {
     val amount: Amount<Issued<T>>
     /**
      * There must be an ExitCommand signed by these keys to destroy the amount. While all states require their
      * owner to sign, some (i.e. cash) also require the issuer.
      */
-    val exitKeys: Collection<CompositeKey>
+    val exitKeys: Collection<PublicKey>
     /** There must be a MoveCommand signed by this key to claim the amount */
-    override val owner: CompositeKey
+    override val owner: PublicKey
 
-    fun move(newAmount: Amount<Issued<T>>, newOwner: CompositeKey): FungibleAsset<T>
+    fun move(newAmount: Amount<Issued<T>>, newOwner: PublicKey): FungibleAsset<T>
 
     // Just for grouping
     interface Commands : CommandData {
@@ -47,7 +50,7 @@ interface FungibleAsset<T> : OwnableState {
          * A command stating that money has been withdrawn from the shared ledger and is now accounted for
          * in some other way.
          */
-        interface Exit<T> : Commands {
+        interface Exit<T : Any> : Commands {
             val amount: Amount<Issued<T>>
         }
     }
@@ -56,8 +59,8 @@ interface FungibleAsset<T> : OwnableState {
 // Small DSL extensions.
 
 /** Sums the asset states in the list, returning null if there are none. */
-fun <T> Iterable<ContractState>.sumFungibleOrNull() = filterIsInstance<FungibleAsset<T>>().map { it.amount }.sumOrNull()
+fun <T : Any> Iterable<ContractState>.sumFungibleOrNull() = filterIsInstance<FungibleAsset<T>>().map { it.amount }.sumOrNull()
 
 /** Sums the asset states in the list, returning zero of the given token if there are none. */
-fun <T> Iterable<ContractState>.sumFungibleOrZero(token: Issued<T>) = filterIsInstance<FungibleAsset<T>>().map { it.amount }.sumOrZero(token)
+fun <T : Any> Iterable<ContractState>.sumFungibleOrZero(token: Issued<T>) = filterIsInstance<FungibleAsset<T>>().map { it.amount }.sumOrZero(token)
 

@@ -7,15 +7,11 @@
 The example CorDapp
 ===================
 
-.. note:: The example CorDapp was previously hosted in the `cordapp-template <https://github.com/corda/cordapp-template>`_ repository. It has now been 
-   moved into a new `cordapp-tutorial <https://github.com/corda/cordapp-tutorial>`_ repository. Going forward, the cordapp-template repo will contain an 
-   actual CorDapp template, which should be used as the basis for your CorDapps going forward.
-
 This guide covers how to get started with the example CorDapp. Please note there are several Corda repositories:
 
 * `corda <https://github.com/corda/corda>`_ which contains the core platform code and sample CorDapps.
-* `cordapp-tutorial <https://github.com/corda/cordapp-tutorial>`_ which contains an example CorDapp you can use to bootstrap your own CorDapps. It is the subject of this tutorial and should help you understand the basics of building a CorDapp.
-* `cordapp-template <https://github.com/corda/cordapp-template>`_ which contains a bare-bones template on which to build your own CorDapps.
+* `cordapp-tutorial <https://github.com/corda/cordapp-tutorial>`_ which contains an example CorDapp you can use to bootstrap your own CorDapps. It is the subject of this tutorial and should help you understand the basics.
+* `cordapp-template <https://github.com/corda/cordapp-template>`_ which contains a bare-bones template designed for starting new projects by copying.
 
 We recommend you read the non-technical white paper and technical white paper before you get started with Corda:
 
@@ -29,7 +25,7 @@ We recommend you read the non-technical white paper and technical white paper be
 Background
 ----------
 
-The Example CorDapp implements a basic scenario where one party wishes to send an IOU to another party. The scenario
+The example CorDapp implements a basic scenario where one party wishes to send an IOU to another party. The scenario
 defines four nodes:
 
 * **Controller**, which hosts the network map service and validating notary service
@@ -57,8 +53,8 @@ for you from our `public Maven repository <https://bintray.com/r3/corda>`_.
 **Using a Corda SNAPSHOT build.** Alternatively, if you wish to work from the master branch of the Corda repo which contains
 the most up-to-date Corda feature set then you will need to clone the ``corda`` repository and publish the latest master
 build (or previously tagged releases) to your local Maven repository. You will then need to ensure that Gradle
-grabs the correct dependencies for you from Maven local by changing the ``corda_version`` in ``build.gradle``. This will be
-covered below in `Using a SNAPSHOT release`_.
+grabs the correct dependencies for you from Maven local by changing the ``corda_release_version`` in ``build.gradle``.
+This will be covered below in `Using a SNAPSHOT release`_.
 
 Firstly, follow the :doc:`getting set up <getting-set-up>` page to download the JDK, IntelliJ and git if you didn't
 already have it.
@@ -105,27 +101,6 @@ Using a SNAPSHOT release
 
 If you wish to build a CorDapp against the most current version of Corda, follow these instructions.
 
-The Corda repository comprises the following folders:
-
-* **buildSrc** contains necessary gradle plugins to build Corda.
-* **client** contains the RPC client framework.
-* **config** contains logging configurations and the default node configuration file.
-* **core** containing the core Corda libraries such as crypto functions, types for Corda's building blocks: states,
-  contracts, transactions, attachments, etc. and some interfaces for nodes and protocols.
-* **docs** contains the Corda docsite in restructured text format as well as the built docs in html. The docs can be
-  accessed via ``/docs/index.html`` from the root of the repo.
-* **finance** defines a range of elementary contracts (and associated schemas) and protocols, such as abstract fungible
-  assets, cash, obligation and commercial paper.
-* **gradle** contains the gradle wrapper which you'll use to execute gradle commands.
-* **gradle-plugins** contains some additional plugins which we use to deploy Corda nodes.
-* **lib** contains some dependencies.
-* **node** contains anything specifically required for creating, running and managing nodes (eg: node driver, servlets,
-  node services, messaging, persistence).
-* **samples** contains all our Corda demos and code samples.
-* **test-utils** contains some utilities for unit testing contracts ( the contracts testing DSL) and protocols (the
-  mock network) implementation.
-* **tools** contains the explorer which is a GUI front-end for Corda.
-
 Firstly navigate to the folder on your machine you wish to clone the Corda repository to. Then use the following command
 to clone the Corda repository:
 
@@ -170,10 +145,10 @@ if you are trying out new features, in this case you can change ``version`` for 
 
 .. note:: **A quick point on corda version numbers used by Gradle.**
 
-  In the ``build.gradle`` file for your CorDapp, you can specify the ``corda_version`` to use. It is important that when
-  developing your CorDapp that you use the correct version number. For example, when wanting to work from a SNAPSHOT
+  In the ``build.gradle`` file for your CorDapp, you can specify the ``corda_release_version`` to use. It is important
+  that when developing your CorDapp that you use the correct version number. For example, when wanting to work from a SNAPSHOT
   release, the release numbers are suffixed with 'SNAPSHOT', e.g. if the latest milestone release is M6 then the
-  SNAPSHOT release will be 0.7-SNAPSHOT, and so on. As such, you will set your ``corda_version`` to ``'0.7-SNAPSHOT'``
+  SNAPSHOT release will be 0.7-SNAPSHOT, and so on. As such, you will set your ``corda_release_version`` to ``'0.7-SNAPSHOT'``
   in the ``build.gradle`` file in your CorDapp. Gradle will automatically grab the SNAPSHOT dependencies from your local
   Maven repository. Alternatively, if working from a milestone release, you will use the version number only, for example
   ``0.6`` or ``0.7``.
@@ -249,7 +224,7 @@ see all available Gradle tasks.
 * For the Corda repo there will be many project listed, the root project ``corda`` and associated sub-projects: ``core``,
   ``finance``, ``node``, etc.
 
-.. note:: It's worth noting that when you change branch in the example CorDapp, the ``corda_version`` will change to
+.. note:: It's worth noting that when you change branch in the example CorDapp, the ``corda_release_version`` will change to
    reflect the version of the branch you are working from.
 
 To execute a task, double click it. The output will be shown in a console window.
@@ -268,8 +243,8 @@ Unix/Mac OSX: ``./gradlew deployNodes``
 Windows: ``gradlew.bat deployNodes``
 
 This build process will build the example CorDapp defined in the example CorDapp source. CorDapps can be written in 
-any language targeting the JVM. In our case, we've provided the example source in both Kotlin (``/kotlin/src``) and 
-Java (``/java/src``) Since both sets of source files are functionally identical, we will refer to the Kotlin build 
+any language targeting the JVM. In our case, we've provided the example source in both Kotlin (``/kotlin-source/src``) and 
+Java (``/java-source/src``) Since both sets of source files are functionally identical, we will refer to the Kotlin build
 throughout the documentation.
 
 For more information on the example CorDapp see "The Example CorDapp" section below. Gradle will then grab all the 
@@ -278,7 +253,7 @@ dependencies for you and build the example CorDapp.
 The ``deployNodes`` Gradle task allows you easily create a formation of Corda nodes. In the case of the example CorDapp
 we are creating ``four`` nodes.
 
-After the building process has finished to see the newly built nodes, you can navigate to the ``kotlin/build/nodes`` folder
+After the building process has finished to see the newly built nodes, you can navigate to the ``kotlin-source/build/nodes`` folder
 located in the ``cordapp-tutorial`` root directory. You can ignore the other folders in ``/build`` for now. The ``nodes``
 folder has the following structure:
 
@@ -323,10 +298,7 @@ start the build process and output progress to a console window in the IDE.
 Running the example CorDapp
 ---------------------------
 
-Running the example CorDapp from the command line
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-To run the sample CorDapp navigate to the ``kotlin/build/nodes`` folder and execute the ``runnodes`` shell script with:
+To run the sample CorDapp navigate to the ``kotlin-source/build/nodes`` folder and execute the ``runnodes`` shell script with:
 
 Unix: ``./runnodes`` or ``sh runnodes``
 
@@ -345,7 +317,7 @@ message and some pertinent config information, see below:
 
   --- DEVELOPER SNAPSHOT ------------------------------------------------------------
 
-  Logs can be found in                    : /Users/rogerwillis/Documents/Corda/cordapp-tutorial/kotlin/build/nodes/nodea/logs
+  Logs can be found in                    : /Users/rogerwillis/Documents/Corda/cordapp-tutorial/kotlin-source/build/nodes/nodea/logs
   Database connection URL is              : jdbc:h2:tcp://10.18.0.196:50661/node
   Node listening on address               : localhost:10004
   Loaded plugins                          : com.example.plugin.ExamplePlugin
@@ -397,7 +369,7 @@ down menu at the top right-hand side of the IDE and press the green arrow to sta
 .. image:: resources/run-config-drop-down.png
   :width: 400
 
-The node driver defined in ``/src/main/kotlin/com/example/Main.kt`` allows you to specify how many nodes you would like
+The node driver defined in ``/src/main/kotlin-source/com/example/Main.kt`` allows you to specify how many nodes you would like
 to run and the various configuration settings for each node. With the example CorDapp, the Node driver starts four nodes
 and sets up an RPC user for all but the "Controller" node (which hosts the notary Service and network map service):
 
@@ -429,7 +401,7 @@ The CorDapp defines a few HTTP API end-points and also serves some static web co
 list IOUs and add IOUs.
 
 The nodes can be found using the following port numbers, defined in build.gradle and the respective node.conf file for
-each node found in `kotlin/build/nodes/NodeX`` etc:
+each node found in `kotlin-source/build/nodes/NodeX`` etc:
 
 * Controller: ``localhost:10003``
 * NodeA:      ``localhost:10005``
@@ -487,14 +459,14 @@ To check what validation is performed over the IOU data, have a look at the ``IO
 .. sourcecode:: kotlin
 
   // Generic constraints around the IOU transaction.
-  "No inputs should be consumed when issuing an IOU." by (tx.inputs.isEmpty())
-  "Only one output state should be created." by (tx.outputs.size == 1)
+  "No inputs should be consumed when issuing an IOU." using (tx.inputs.isEmpty())
+  "Only one output state should be created." using (tx.outputs.size == 1)
   val out = tx.outputs.single() as IOUState
-  "The sender and the recipient cannot be the same entity." by (out.sender != out.recipient)
-  "All of the participants must be signers." by (command.signers.containsAll(out.participants))
+  "The sender and the recipient cannot be the same entity." using (out.sender != out.recipient)
+  "All of the participants must be signers." using (command.signers.containsAll(out.participants))
 
   // IOU-specific constraints.
-  "The IOU's value must be non-negative." by (out.iou.value > 0)
+  "The IOU's value must be non-negative." using (out.iou.value > 0)
 
 **Once an IOU has been submitted:**
 
@@ -505,25 +477,25 @@ activity in the terminal windows for NodeA and NodeB (note: the green ticks are 
 
 .. sourcecode:: none
 
-✅  Generating transaction based on new IOU.
-✅  Verifying contract constraints.
-✅  Signing transaction with our private key.
-✅  Sending proposed transaction to recipient for review.
-✅  Done
+   ✅  Generating transaction based on new IOU.
+   ✅  Verifying contract constraints.
+   ✅  Signing transaction with our private key.
+   ✅  Sending proposed transaction to recipient for review.
+   ✅  Done
 
 *NodeB:*
 
 .. sourcecode:: none
 
-✅  Receiving proposed transaction from sender.
-✅  Verifying signatures and contract constraints.
-✅  Signing proposed transaction with our private key.
-✅  Obtaining notary signature and recording transaction.
-    ✅  Requesting signature by notary service
-        ✅  Requesting signature by Notary service
-        ✅  Validating response from Notary service
-    ✅  Broadcasting transaction to participants
-✅  Done
+   ✅  Receiving proposed transaction from sender.
+   ✅  Verifying signatures and contract constraints.
+   ✅  Signing proposed transaction with our private key.
+   ✅  Obtaining notary signature and recording transaction.
+       ✅  Requesting signature by notary service
+           ✅  Requesting signature by Notary service
+           ✅  Validating response from Notary service
+       ✅  Broadcasting transaction to participants
+   ✅  Done
 
 *NodeC:*
 
@@ -575,7 +547,7 @@ query them using SQL.
 Using the Example RPC client
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The ``/src/main/kotlin/com/example/client/ExampleClientRPC.kt`` file is a simple utility which uses the client RPC library
+The ``/src/main/kotlin-source/com/example/client/ExampleClientRPC.kt`` file is a simple utility which uses the client RPC library
 to connect to a node and log the created IOUs. It will log any existing IOUs and listen for any future
 IOUs. If you haven't created any IOUs when you connect to one of the Nodes via RPC then the client will log
 and future IOUs which are agreed.
@@ -717,13 +689,13 @@ In the file structure above, the most important files and directories to note ar
 * **gradle** contains the gradle wrapper, which allows the use of Gradle without installing it yourself and worrying
   about which version is required.
 * **lib** contains the Quasar.jar which is required for runtime instrumentation of classes by Quasar.
-* **kotlin** contains the source code for the example CorDapp written in Kotlin.
- * **kotlin/src/main/kotlin** contains the source code for the example CorDapp.
- * **kotlin/src/main/python** contains a python script which accesses nodes via RPC.
- * **kotlin/src/main/resources** contains the certificate store, some static web content to be served by the nodes and the
+* **kotlin-source** contains the source code for the example CorDapp written in Kotlin.
+ * **kotlin-source/src/main/kotlin** contains the source code for the example CorDapp.
+ * **kotlin-source/src/main/python** contains a python script which accesses nodes via RPC.
+ * **kotlin-source/src/main/resources** contains the certificate store, some static web content to be served by the nodes and the
    PluginServiceRegistry file.
- * **kotlin/src/test/kotlin** contains unit tests for protocols, contracts, etc.
-* **java** contains the same source code, but written in java. This is an aid for users who do not want to develop in 
+ * **kotlin-source/src/test/kotlin** contains unit tests for protocols, contracts, etc.
+* **java-source** contains the same source code, but written in java. This is an aid for users who do not want to develop in
   Kotlin, and serves as an example of how CorDapps can be developed in any language targeting the JVM.
 
 Some elements are covered in more detail below.
@@ -740,15 +712,15 @@ are available for use in the rest of the build script. It also specifies version
 things.
 
 If you are working from a Corda SNAPSHOT release which you have publish to Maven local then ensure that
-``corda_version`` is the same as the version of the Corda core modules you published to Maven local. If not then change the
-``kotlin_version`` property. Also, if you are working from a previous cordapp-tutorial milestone release, then be sure to ``git checkout``
-the correct version of the example CorDapp from the ``cordapp-tutorial`` repo.
+``corda_release_version`` is the same as the version of the Corda core modules you published to Maven local. If not then
+change the ``kotlin_version`` property. Also, if you are working from a previous cordapp-tutorial milestone release, then
+be sure to ``git checkout`` the correct version of the example CorDapp from the ``cordapp-tutorial`` repo.
 
 .. sourcecode:: groovy
 
   buildscript {
       ext.kotlin_version = '1.0.4'
-      ext.corda_version = '0.5-SNAPSHOT' // Ensure this version is the same as the corda core modules you are using.
+      ext.corda_release_version = '0.5-SNAPSHOT' // Ensure this version is the same as the corda core modules you are using.
       ext.quasar_version = '0.7.6'
       ext.jersey_version = '2.23.1'
 
@@ -775,12 +747,12 @@ code snippet.package. Use the standard format:
       testCompile group: 'junit', name: 'junit', version: '4.11'
 
       // Corda integration dependencies
-      compile "net.corda:client:$corda_version"
-      compile "net.corda:core:$corda_version"
-      compile "net.corda:contracts:$corda_version"
-      compile "net.corda:node:$corda_version"
-      compile "net.corda:corda:$corda_version"
-      compile "net.corda:test-utils:$corda_version"
+      compile "net.corda:client:$corda_release_version"
+      compile "net.corda:core:$corda_release_version"
+      compile "net.corda:contracts:$corda_release_version"
+      compile "net.corda:node:$corda_release_version"
+      compile "net.corda:corda:$corda_release_version"
+      compile "net.corda:test-utils:$corda_release_version"
 
       ...
 
@@ -800,23 +772,25 @@ like to deploy for testing. See further details below:
 
 .. sourcecode:: groovy
 
-  task deployNodes(type: com.r3corda.plugins.Cordform, dependsOn: ['build']) {
-      directory "./kotlin/build/nodes"                            // The output directory.
-      networkMap "Controller"                              // The artemis address of the node to be used as the network map.
+  task deployNodes(type: com.r3corda.plugins.Cordform, dependsOn: ['jar']) {
+      directory "./kotlin-source/build/nodes"                            // The output directory.
+      networkMap "CN=Controller,O=R3,OU=corda,L=London,C=UK" // The distinguished name of the node to be used as the network map.
       node {
-          name "Controller"                                // Artemis name of node to be deployed.
+          name "CN=Controller,O=R3,OU=corda,L=London,C=UK" // Distinguished name of node to be deployed.
           nearestCity "London"                             // For use with the network visualiser.
           advertisedServices = ["corda.notary.validating"] // A list of services you wish the node to offer.
-          artemisPort 10002
-          webPort 10003                                    // Usually 1 higher than the Artemis port.
+          p2pPort 10002
+          rpcPort 10003                                    // Usually 1 higher than the messaging port.
+          webPort 10004                                    // Usually 1 higher than the RPC port.
           cordapps = []                                    // Add package names of CordaApps.
       }
       node {                                               // Create an additional node.
-          name "NodeA"
+          name "CN=NodeA,O=R3,OU=corda,L=London,C=UK"
           nearestCity "London"
           advertisedServices = []
-          artemisPort 10004
-          webPort 10005
+          p2pPort 10005
+          rpcPort 10006
+          webPort 10007
           cordapps = []
       }
       ...
@@ -844,7 +818,7 @@ Re-Deploying Your Nodes Locally
 If you need to create any additional nodes you can do it via the ``build.gradle`` file as discussed above in
 ``the build.gradle file`` and in more detail in the "cordFormation" section.
 
-You may also wish to edit the ``/kotlin/build/nodes/<node name>/node.conf`` files for your nodes. For more information on
+You may also wish to edit the ``/kotlin-source/build/nodes/<node name>/node.conf`` files for your nodes. For more information on
 doing this, see the :doc:`Corda configuration file <corda-configuration-file>` page.
 
 Once you have made some changes to your CorDapp you can redeploy it with the following command:
@@ -859,32 +833,25 @@ Running Nodes Across Machines
 The nodes can also be set up to communicate between separate machines on the 
 same subnet.
 
-After deploying the nodes, navigate to the build folder (`kotlin/build/
-nodes` or `java/build/nodes`) and move some of the individual node folders to 
-separate machines on the same subnet (e.g. using a USB key). It is important 
-that no nodes - including the controller node - end up on more than one 
-machine. Each computer should also have a copy of `runnodes` and 
-`runnodes.bat`.
+After deploying the nodes, navigate to the build folder (``kotlin-source/build/nodes`` or ``java-source/build/nodes``)
+and move some of the individual node folders to separate machines on the same subnet (e.g. using a USB key).
+It is important that no nodes - including the controller node - end up on more than one machine. Each computer
+should also have a copy of ``runnodes`` and ``runnodes.bat``.
 
 For example, you may end up with the following layout:
 
-* Machine 1: `controller`, `nodea`, `runnodes`, `runnodes.bat`
-* Machine 2: `nodeb`, `nodec`, `runnodes`, `runnodes.bat`
+* Machine 1: ``controller``, ``nodea``, ``runnodes``, ``runnodes.bat``
+* Machine 2: ``nodeb``, ``nodec``, ``runnodes``, ``runnodes.bat``
 
-You must now edit the configuration file for each node, including the 
-controller. Open each node's config file (`[nodeName]/node.conf`), and make 
-the following changes:
+You must now edit the configuration file for each node, including the controller. Open each node's config file,
+and make the following changes:
 
-* Change the artemis address to the machine's ip address (e.g. 
-`artemisAddress="10.18.0.166:10006"`)
-* Change the network map service details to the ip address of the machine where the
-controller node is running and to its legal name (e.g. `networkMapService.address="10.18.0.166:10002"` and
-`networkMapService.legalName=controller`) (please note that the controller will not have the `networkMapService` config)
+* Change the Artemis messaging address to the machine's IP address (e.g. ``p2pAddress="10.18.0.166:10006"``)
+* Change the network map service details to the IP address of the machine where the
+  controller node is running and to its legal name (e.g. ``networkMapService.address="10.18.0.166:10002"`` and
+  ``networkMapService.legalName=controller``) (please note that the controller will not have the ``networkMapService`` config)
 
-Each machine should now run its nodes using `runnodes` or `runnodes.bat` 
-files. Once they are up and running, the nodes should be able to create 
-IOUs among themselves in the same way as when they were running on 
-the same machine.
+Now run each node.
 
 Debugging your CorDapp
 ~~~~~~~~~~~~~~~~~~~~~~

@@ -6,7 +6,10 @@ import com.nhaarman.mockito_kotlin.mock
 import net.corda.core.crypto.SecureHash
 import net.corda.core.crypto.X509Utilities
 import net.corda.core.exists
+import net.corda.core.utilities.ALICE
 import net.corda.testing.TestNodeConfiguration
+import net.corda.testing.getTestX509Name
+import org.bouncycastle.asn1.x500.X500Name
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -23,9 +26,12 @@ class NetworkRegistrationHelperTest {
     fun buildKeyStore() {
         val id = SecureHash.randomSHA256().toString()
 
-        val certs = arrayOf(X509Utilities.createSelfSignedCACert("CORDA_CLIENT_CA").certificate,
-                X509Utilities.createSelfSignedCACert("CORDA_INTERMEDIATE_CA").certificate,
-                X509Utilities.createSelfSignedCACert("CORDA_ROOT_CA").certificate)
+        val identities = listOf("CORDA_CLIENT_CA",
+                "CORDA_INTERMEDIATE_CA",
+                "CORDA_ROOT_CA")
+                .map { getTestX509Name(it) }
+        val certs = identities.map { X509Utilities.createSelfSignedCACert(it).certificate }
+                .toTypedArray()
 
         val certService: NetworkRegistrationService = mock {
             on { submitRequest(any()) }.then { id }
@@ -34,7 +40,7 @@ class NetworkRegistrationHelperTest {
 
         val config = TestNodeConfiguration(
                 baseDirectory = tempFolder.root.toPath(),
-                myLegalName = "me",
+                myLegalName = ALICE.name,
                 networkMapService = null)
 
         assertFalse(config.keyStoreFile.exists())

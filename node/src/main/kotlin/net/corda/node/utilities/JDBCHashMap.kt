@@ -3,7 +3,7 @@ package net.corda.node.utilities
 import net.corda.core.serialization.SerializedBytes
 import net.corda.core.serialization.deserialize
 import net.corda.core.serialization.serialize
-import net.corda.core.serialization.threadLocalStorageKryo
+import net.corda.core.serialization.storageKryo
 import net.corda.core.utilities.loggerFor
 import net.corda.core.utilities.trace
 import org.jetbrains.exposed.sql.*
@@ -21,11 +21,12 @@ import kotlin.system.measureTimeMillis
 
 /**
  * The default maximum size of the LRU cache.
+ * Current computation is linear to max heap size, ensuring a minimum of 256 buckets.
  *
  * TODO: make this value configurable
  * TODO: tune this value, as it's currently mostly a guess
  */
-val DEFAULT_MAX_BUCKETS = 4096
+val DEFAULT_MAX_BUCKETS = (256 * (1 + Math.max(0, (Runtime.getRuntime().maxMemory() / 1000000 - 128) / 64))).toInt()
 
 /**
  * A convenient JDBC table backed hash map with iteration order based on insertion order.
@@ -65,7 +66,7 @@ fun bytesToBlob(value: SerializedBytes<*>, finalizables: MutableList<() -> Unit>
     return blob
 }
 
-fun serializeToBlob(value: Any, finalizables: MutableList<() -> Unit>): Blob = bytesToBlob(value.serialize(threadLocalStorageKryo(), true), finalizables)
+fun serializeToBlob(value: Any, finalizables: MutableList<() -> Unit>): Blob = bytesToBlob(value.serialize(storageKryo(), true), finalizables)
 
 fun <T : Any> bytesFromBlob(blob: Blob): SerializedBytes<T> {
     try {
@@ -188,7 +189,7 @@ abstract class AbstractJDBCHashSet<K : Any, out T : JDBCHashedTable>(protected v
  * number of hash "buckets", where one bucket represents all entries with the same hash code.  There is a default value
  * for maximum buckets.
  *
- * All operations require a [databaseTransaction] to be started.
+ * All operations require a [transaction] to be started.
  *
  * The keys/values/entries collections are really designed just for iterating and other uses might turn out to be
  * costly in terms of performance.  Beware when loadOnInit=true, the iterator first sorts the entries which could be
@@ -254,7 +255,7 @@ abstract class AbstractJDBCHashMap<K : Any, V : Any, out T : JDBCHashedTable>(va
     override fun remove(key: K): V? {
         val bucket = getBucket(key)
         var removed: V? = null
-        buckets.computeIfPresent(key.hashCode()) { hashCode, value ->
+        buckets.computeIfPresent(key.hashCode()) { _, value ->
             for (entry in value) {
                 if (entry.key == key) {
                     removed = entry.value
@@ -271,6 +272,7 @@ abstract class AbstractJDBCHashMap<K : Any, V : Any, out T : JDBCHashedTable>(va
     override fun containsKey(key: K): Boolean = (get(key) != null)
 
     // We haven't implemented setValue.  We could implement if necessary.
+    // Make sure to remove the relevant suppressed tests in JDBCHashMapTestSuite.createMapTestSuite if this is implemented.
     private class NotReallyMutableEntry<K, V>(key: K, value: V, val seqNo: Int) : AbstractMap.SimpleImmutableEntry<K, V>(key, value), MutableMap.MutableEntry<K, V> {
         override fun setValue(newValue: V): V {
             throw UnsupportedOperationException("Not really mutable.  Implement if really required.")
@@ -367,7 +369,7 @@ abstract class AbstractJDBCHashMap<K : Any, V : Any, out T : JDBCHashedTable>(va
         var oldValue: V? = null
         var oldSeqNo: Int? = null
         getBucket(key)
-        buckets.compute(key.hashCode()) { hashCode, list ->
+        buckets.compute(key.hashCode()) { _, list ->
             val newList = list ?: newBucket()
             val iterator = newList.listIterator()
             while (iterator.hasNext()) {
@@ -422,7 +424,7 @@ abstract class AbstractJDBCHashMap<K : Any, V : Any, out T : JDBCHashedTable>(va
     }
 
     private fun getBucket(key: Any): MutableList<NotReallyMutableEntry<K, V>> {
-        return buckets.computeIfAbsent(key.hashCode()) { hashCode ->
+        return buckets.computeIfAbsent(key.hashCode()) { _ ->
             if (!loadOnInit) {
                 loadBucket(key.hashCode())
             } else {

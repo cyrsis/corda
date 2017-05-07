@@ -1,36 +1,44 @@
 package net.corda.testing.node
 
+import com.google.common.annotations.VisibleForTesting
 import com.google.common.jimfs.Configuration.unix
 import com.google.common.jimfs.Jimfs
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import net.corda.core.*
 import net.corda.core.crypto.Party
+import net.corda.core.crypto.X509Utilities
+import net.corda.core.crypto.commonName
 import net.corda.core.crypto.entropyToKeyPair
+import net.corda.core.flows.FlowLogic
 import net.corda.core.messaging.RPCOps
 import net.corda.core.messaging.SingleMessageRecipient
 import net.corda.core.node.CordaPluginRegistry
 import net.corda.core.node.PhysicalLocation
 import net.corda.core.node.ServiceEntry
-import net.corda.core.node.Version
 import net.corda.core.node.services.*
 import net.corda.core.utilities.DUMMY_NOTARY_KEY
 import net.corda.core.utilities.loggerFor
 import net.corda.node.internal.AbstractNode
-import net.corda.node.services.api.MessagingServiceInternal
+import net.corda.node.internal.ServiceFlowInfo
 import net.corda.node.services.config.NodeConfiguration
 import net.corda.node.services.keys.E2ETestKeyManagementService
+import net.corda.node.services.messaging.MessagingService
 import net.corda.node.services.network.InMemoryNetworkMapService
 import net.corda.node.services.network.NetworkMapService
+import net.corda.node.services.statemachine.flowVersion
+import net.corda.node.services.transactions.InMemoryTransactionVerifierService
 import net.corda.node.services.transactions.InMemoryUniquenessProvider
 import net.corda.node.services.transactions.SimpleNotaryService
 import net.corda.node.services.transactions.ValidatingNotaryService
 import net.corda.node.services.vault.NodeVaultService
 import net.corda.node.utilities.AffinityExecutor
 import net.corda.node.utilities.AffinityExecutor.ServiceAffinityExecutor
-import net.corda.testing.MOCK_VERSION
+import net.corda.testing.MOCK_VERSION_INFO
 import net.corda.testing.TestNodeConfiguration
+import net.corda.testing.getTestX509Name
 import org.apache.activemq.artemis.utils.ReusableLatch
+import org.bouncycastle.asn1.x500.X500Name
 import org.slf4j.Logger
 import java.math.BigInteger
 import java.nio.file.FileSystem
@@ -38,6 +46,7 @@ import java.security.KeyPair
 import java.util.*
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.reflect.KClass
 
 /**
  * A mock node brings up a suite of in-memory services in a fast manner suitable for unit testing.
@@ -55,7 +64,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
                   private val threadPerNode: Boolean = false,
                   servicePeerAllocationStrategy: InMemoryMessagingNetwork.ServicePeerAllocationStrategy =
-                      InMemoryMessagingNetwork.ServicePeerAllocationStrategy.Random(),
+                  InMemoryMessagingNetwork.ServicePeerAllocationStrategy.Random(),
                   private val defaultFactory: Factory = MockNetwork.DefaultFactory) {
     private var nextNodeId = 0
     val filesystem: FileSystem = Jimfs.newFileSystem(unix())
@@ -135,7 +144,7 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
             AbstractNode(config, advertisedServices, TestClock(), mockNet.busyLatch) {
         var counter = entropyRoot
         override val log: Logger = loggerFor<MockNode>()
-        override val version: Version get() = MOCK_VERSION
+        override val platformVersion: Int get() = MOCK_VERSION_INFO.platformVersion
         override val serverThread: AffinityExecutor =
                 if (mockNet.threadPerNode)
                     ServiceAffinityExecutor("Mock node $id thread", 1)
@@ -146,9 +155,17 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
 
         // We only need to override the messaging service here, as currently everything that hits disk does so
         // through the java.nio API which we are already mocking via Jimfs.
-        override fun makeMessagingService(): MessagingServiceInternal {
+        override fun makeMessagingService(): MessagingService {
             require(id >= 0) { "Node ID must be zero or positive, was passed: " + id }
-            return mockNet.messagingNetwork.createNodeWithID(!mockNet.threadPerNode, id, serverThread, makeServiceEntries(), configuration.myLegalName, database).start().getOrThrow()
+            return mockNet.messagingNetwork.createNodeWithID(
+                    !mockNet.threadPerNode,
+                    id,
+                    serverThread,
+                    makeServiceEntries(),
+                    configuration.myLegalName,
+                    database)
+                    .start()
+                    .getOrThrow()
         }
 
         override fun makeIdentityService() = MockIdentityService(mockNet.identities)
@@ -164,7 +181,7 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
         }
 
         override fun makeNetworkMapService() {
-            inNodeNetworkMapService = InMemoryNetworkMapService(services)
+            inNodeNetworkMapService = InMemoryNetworkMapService(services, platformVersion)
         }
 
         override fun makeServiceEntries(): List<ServiceEntry> {
@@ -198,6 +215,8 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
 
         override fun makeUniquenessProvider(type: ServiceType): UniquenessProvider = InMemoryUniquenessProvider()
 
+        override fun makeTransactionVerifierService() = InMemoryTransactionVerifierService(1)
+
         override fun start(): MockNode {
             super.start()
             mockNet.identities.add(info.legalIdentity)
@@ -213,6 +232,13 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
         // This does not indirect through the NodeInfo object so it can be called before the node is started.
         // It is used from the network visualiser tool.
         @Suppress("unused") val place: PhysicalLocation get() = findMyLocation()!!
+
+        @VisibleForTesting
+        fun registerServiceFlow(clientFlowClass: KClass<out FlowLogic<*>>,
+                                flowVersion: Int = clientFlowClass.java.flowVersion,
+                                serviceFlowFactory: (Party) -> FlowLogic<*>) {
+            serviceFlowFactories[clientFlowClass.java] = ServiceFlowInfo.CorDapp(flowVersion, serviceFlowFactory)
+        }
 
         fun pumpReceive(block: Boolean = false): InMemoryMessagingNetwork.MessageTransfer? {
             return (net as InMemoryMessagingNetwork.InMemoryMessaging).pumpReceive(block)
@@ -241,9 +267,9 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
      * but can be overriden to cause nodes to have stable or colliding identity/service keys.
      */
     fun createNode(networkMapAddress: SingleMessageRecipient? = null, forcedID: Int = -1, nodeFactory: Factory = defaultFactory,
-                   start: Boolean = true, legalName: String? = null, overrideServices: Map<ServiceInfo, KeyPair>? = null,
+                   start: Boolean = true, legalName: X500Name? = null, overrideServices: Map<ServiceInfo, KeyPair>? = null,
                    vararg advertisedServices: ServiceInfo): MockNode
-        = createNode(networkMapAddress, forcedID, nodeFactory, start, legalName, overrideServices, BigInteger.valueOf(random63BitValue()), *advertisedServices)
+            = createNode(networkMapAddress, forcedID, nodeFactory, start, legalName, overrideServices, BigInteger.valueOf(random63BitValue()), *advertisedServices)
 
     /**
      * Returns a node, optionally created by the passed factory method.
@@ -253,7 +279,7 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
      * but can be overriden to cause nodes to have stable or colliding identity/service keys.
      */
     fun createNode(networkMapAddress: SingleMessageRecipient? = null, forcedID: Int = -1, nodeFactory: Factory = defaultFactory,
-                   start: Boolean = true, legalName: String? = null, overrideServices: Map<ServiceInfo, KeyPair>? = null,
+                   start: Boolean = true, legalName: X500Name? = null, overrideServices: Map<ServiceInfo, KeyPair>? = null,
                    entropyRoot: BigInteger = BigInteger.valueOf(random63BitValue()),
                    vararg advertisedServices: ServiceInfo): MockNode {
         val newNode = forcedID == -1
@@ -265,7 +291,7 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
 
         val config = TestNodeConfiguration(
                 baseDirectory = path,
-                myLegalName = legalName ?: "Mock Company $id",
+                myLegalName = legalName ?: getTestX509Name("Mock Company $id"),
                 networkMapService = null,
                 dataSourceProperties = makeTestDataSourceProperties("node_${id}_net_$networkId"))
         val node = nodeFactory.create(config, this, networkMapAddress, advertisedServices.toSet(), id, overrideServices, entropyRoot)
@@ -304,7 +330,10 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
      * Sets up a two node network, in which the first node runs network map and notary services and the other
      * doesn't.
      */
-    fun createTwoNodes(nodeFactory: Factory = defaultFactory, notaryKeyPair: KeyPair? = null): Pair<MockNode, MockNode> {
+    fun createTwoNodes(firstNodeName: X500Name? = null,
+                       secondNodeName: X500Name? = null,
+                       nodeFactory: Factory = defaultFactory,
+                       notaryKeyPair: KeyPair? = null): Pair<MockNode, MockNode> {
         require(nodes.isEmpty())
         val notaryServiceInfo = ServiceInfo(SimpleNotaryService.type)
         val notaryOverride = if (notaryKeyPair != null)
@@ -312,8 +341,8 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
         else
             null
         return Pair(
-                createNode(null, -1, nodeFactory, true, null, notaryOverride, BigInteger.valueOf(random63BitValue()), ServiceInfo(NetworkMapService.type), notaryServiceInfo),
-                createNode(nodes[0].info.address, -1, nodeFactory, true, null)
+                createNode(null, -1, nodeFactory, true, firstNodeName, notaryOverride, BigInteger.valueOf(random63BitValue()), ServiceInfo(NetworkMapService.type), notaryServiceInfo),
+                createNode(nodes[0].info.address, -1, nodeFactory, true, secondNodeName)
         )
     }
 
@@ -346,15 +375,15 @@ class MockNetwork(private val networkSendManuallyPumped: Boolean = false,
     }
 
     fun createNotaryNode(networkMapAddr: SingleMessageRecipient? = null,
-                         legalName: String? = null,
+                         legalName: X500Name? = null,
                          overrideServices: Map<ServiceInfo, KeyPair>? = null,
-                         serviceName: String? = null): MockNode {
+                         serviceName: X500Name? = null): MockNode {
         return createNode(networkMapAddr, -1, defaultFactory, true, legalName, overrideServices, BigInteger.valueOf(random63BitValue()),
                 ServiceInfo(NetworkMapService.type), ServiceInfo(ValidatingNotaryService.type, serviceName))
     }
 
     fun createPartyNode(networkMapAddr: SingleMessageRecipient,
-                        legalName: String? = null,
+                        legalName: X500Name? = null,
                         overrideServices: Map<ServiceInfo, KeyPair>? = null): MockNode {
         return createNode(networkMapAddr, -1, defaultFactory, true, legalName, overrideServices)
     }

@@ -15,10 +15,10 @@ import java.security.cert.Certificate
 import kotlin.system.exitProcess
 
 /**
- * This checks the [config.certificatesDirectory] for certificates required to connect to a Corda network.
- * If the certificates are not found, a [PKCS10CertificationRequest] will be submitted to Corda network permissioning server using [NetworkRegistrationService].
- * This process will enter a polling loop until the request has been approved, and then
- * the certificate chain will be downloaded and stored in [Keystore] reside in [config.certificatesDirectory].
+ * This checks the config.certificatesDirectory field for certificates required to connect to a Corda network.
+ * If the certificates are not found, a [org.bouncycastle.pkcs.PKCS10CertificationRequest] will be submitted to
+ * Corda network permissioning server using [NetworkRegistrationService]. This process will enter a polling loop until the request has been approved, and then
+ * the certificate chain will be downloaded and stored in [Keystore] reside in the certificates directory.
  */
 class NetworkRegistrationHelper(val config: NodeConfiguration, val certService: NetworkRegistrationService) {
     companion object {
@@ -100,7 +100,7 @@ class NetworkRegistrationHelper(val config: NodeConfiguration, val certService: 
     private fun submitOrResumeCertificateSigningRequest(keyPair: KeyPair): String {
         // Retrieve request id from file if exists, else post a request to server.
         return if (!requestIdStore.exists()) {
-            val request = X509Utilities.createCertificateSigningRequest(config.myLegalName, config.nearestCity, config.emailAddress, keyPair)
+            val request = X509Utilities.createCertificateSigningRequest(config.myLegalName, keyPair)
             val writer = StringWriter()
             JcaPEMWriter(writer).use {
                 it.writeObject(PemObject("CERTIFICATE REQUEST", request.encoded))

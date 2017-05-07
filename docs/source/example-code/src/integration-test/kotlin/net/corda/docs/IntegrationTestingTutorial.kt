@@ -4,23 +4,21 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import net.corda.contracts.asset.Cash
 import net.corda.core.contracts.DOLLARS
-import net.corda.core.contracts.issuedBy
 import net.corda.core.getOrThrow
 import net.corda.core.messaging.startFlow
 import net.corda.core.node.services.ServiceInfo
 import net.corda.core.node.services.Vault
 import net.corda.core.serialization.OpaqueBytes
-import net.corda.core.toFuture
+import net.corda.core.utilities.ALICE
+import net.corda.core.utilities.BOB
+import net.corda.core.utilities.DUMMY_NOTARY
 import net.corda.flows.CashIssueFlow
 import net.corda.flows.CashPaymentFlow
 import net.corda.node.driver.driver
-import net.corda.node.services.User
 import net.corda.node.services.startFlowPermission
 import net.corda.node.services.transactions.ValidatingNotaryService
-import net.corda.testing.expect
-import net.corda.testing.expectEvents
-import net.corda.testing.parallel
-import net.corda.testing.sequence
+import net.corda.nodeapi.User
+import net.corda.testing.*
 import org.junit.Test
 import java.util.*
 import kotlin.concurrent.thread
@@ -31,25 +29,26 @@ class IntegrationTestingTutorial {
     fun `alice bob cash exchange example`() {
         // START 1
         driver {
-            val testUser = User("testUser", "testPassword", permissions = setOf(
-                    startFlowPermission<CashIssueFlow>(),
+            val aliceUser = User("aliceUser", "testPassword1", permissions = setOf(
+                    startFlowPermission<CashIssueFlow>()
+            ))
+            val bobUser = User("bobUser", "testPassword2", permissions = setOf(
                     startFlowPermission<CashPaymentFlow>()
             ))
             val (alice, bob, notary) = Futures.allAsList(
-                    startNode("Alice", rpcUsers = listOf(testUser)),
-                    startNode("Bob", rpcUsers = listOf(testUser)),
-                    startNode("Notary", advertisedServices = setOf(ServiceInfo(ValidatingNotaryService.type)))
+                    startNode(ALICE.name, rpcUsers = listOf(aliceUser)),
+                    startNode(BOB.name, rpcUsers = listOf(bobUser)),
+                    startNode(DUMMY_NOTARY.name, advertisedServices = setOf(ServiceInfo(ValidatingNotaryService.type)))
             ).getOrThrow()
             // END 1
 
             // START 2
             val aliceClient = alice.rpcClientToNode()
-
-            aliceClient.start("testUser", "testPassword")
+            aliceClient.start("aliceUser", "testPassword1")
             val aliceProxy = aliceClient.proxy()
-            val bobClient = bob.rpcClientToNode()
 
-            bobClient.start("testUser", "testPassword")
+            val bobClient = bob.rpcClientToNode()
+            bobClient.start("bobUser", "testPassword2")
             val bobProxy = bobClient.proxy()
             // END 2
 
@@ -61,7 +60,7 @@ class IntegrationTestingTutorial {
             // START 4
             val issueRef = OpaqueBytes.of(0)
             val futures = Stack<ListenableFuture<*>>()
-            for (i in 1 .. 10) {
+            (1..10).map { i ->
                 thread {
                     futures.push(aliceProxy.startFlow(::CashIssueFlow,
                             i.DOLLARS,
@@ -70,14 +69,12 @@ class IntegrationTestingTutorial {
                             notary.nodeInfo.notaryIdentity
                     ).returnValue)
                 }
-            }
-            while (!futures.empty()) {
-                futures.pop().getOrThrow()
-            }
+            }.forEach(Thread::join) // Ensure the stack of futures is populated.
+            futures.forEach { it.getOrThrow() }
 
             bobVaultUpdates.expectEvents {
                 parallel(
-                        (1 .. 10).map { i ->
+                        (1..10).map { i ->
                             expect(
                                     match = { update: Vault.Update ->
                                         (update.produced.first().state.data as Cash.State).amount.quantity == i * 100L
@@ -91,16 +88,13 @@ class IntegrationTestingTutorial {
             // END 4
 
             // START 5
-            for (i in 1 .. 10) {
-                bobProxy.startFlow(::CashPaymentFlow,
-                        i.DOLLARS.issuedBy(alice.nodeInfo.legalIdentity.ref(issueRef)),
-                        alice.nodeInfo.legalIdentity
-                ).returnValue.getOrThrow()
+            for (i in 1..10) {
+                bobProxy.startFlow(::CashPaymentFlow, i.DOLLARS, alice.nodeInfo.legalIdentity).returnValue.getOrThrow()
             }
 
             aliceVaultUpdates.expectEvents {
                 sequence(
-                        (1 .. 10).map { i ->
+                        (1..10).map { i ->
                             expect { update: Vault.Update ->
                                 println("Alice got vault update of $update")
                                 assertEquals((update.produced.first().state.data as Cash.State).amount.quantity, i * 100L)

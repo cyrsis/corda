@@ -1,22 +1,31 @@
 package net.corda.core.serialization
 
+import com.esotericsoftware.kryo.Kryo
 import com.google.common.primitives.Ints
 import net.corda.core.crypto.*
-import net.corda.core.messaging.Ack
+import net.corda.node.services.messaging.Ack
+import net.corda.node.services.persistence.NodeAttachmentService
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
-import org.bouncycastle.jce.provider.BouncyCastleProvider
-import org.bouncycastle.pqc.jcajce.provider.BouncyCastlePQCProvider
+import org.junit.Before
 import org.junit.Test
+import org.slf4j.LoggerFactory
+import java.io.ByteArrayInputStream
 import java.io.InputStream
-import java.security.Security
 import java.time.Instant
 import java.util.*
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class KryoTests {
 
-    private val kryo = createKryo()
+    private lateinit var kryo: Kryo
+
+    @Before
+    fun setup() {
+        // We deliberately do not return this, since we do some unorthodox registering below and do not want to pollute the pool.
+        kryo = p2PKryo().borrow()
+    }
 
     @Test
     fun ok() {
@@ -67,15 +76,14 @@ class KryoTests {
         val keyPair = generateKeyPair()
         val bitsToSign: ByteArray = Ints.toByteArray(0x01234567)
         val wrongBits: ByteArray = Ints.toByteArray(0x76543210)
-        val signature = keyPair.signWithECDSA(bitsToSign)
-        signature.verifyWithECDSA(bitsToSign)
-        assertThatThrownBy { signature.verifyWithECDSA(wrongBits) }
+        val signature = keyPair.sign(bitsToSign)
+        signature.verify(bitsToSign)
+        assertThatThrownBy { signature.verify(wrongBits) }
 
         val deserialisedKeyPair = keyPair.serialize(kryo).deserialize(kryo)
-        val deserialisedSignature = deserialisedKeyPair.signWithECDSA(bitsToSign)
-        assertThat(deserialisedSignature).isEqualTo(signature)
-        deserialisedSignature.verifyWithECDSA(bitsToSign)
-        assertThatThrownBy { deserialisedSignature.verifyWithECDSA(wrongBits) }
+        val deserialisedSignature = deserialisedKeyPair.sign(bitsToSign)
+        deserialisedSignature.verify(bitsToSign)
+        assertThatThrownBy { deserialisedSignature.verify(wrongBits) }
     }
 
     @Test
@@ -90,7 +98,7 @@ class KryoTests {
     fun `InputStream serialisation`() {
         val rubbish = ByteArray(12345, { (it * it * 0.12345).toByte() })
         val readRubbishStream: InputStream = rubbish.inputStream().serialize(kryo).deserialize(kryo)
-        for (i in 0 .. 12344) {
+        for (i in 0..12344) {
             assertEquals(rubbish[i], readRubbishStream.read().toByte())
         }
         assertEquals(-1, readRubbishStream.read())
@@ -98,8 +106,6 @@ class KryoTests {
 
     @Test
     fun `serialize - deserialize MetaData`() {
-        Security.addProvider(BouncyCastleProvider())
-        Security.addProvider(BouncyCastlePQCProvider())
         val testString = "Hello World"
         val testBytes = testString.toByteArray()
         val keyPair1 = Crypto.generateKeyPair("ECDSA_SECP256K1_SHA256")
@@ -110,6 +116,24 @@ class KryoTests {
         val serializedMetaData = meta.bytes()
         val meta2 = serializedMetaData.deserialize<MetaData>()
         assertEquals(meta2, meta)
+    }
+
+    @Test
+    fun `serialize - deserialize Logger`() {
+        val logger = LoggerFactory.getLogger("aName")
+        val logger2 = logger.serialize(storageKryo()).deserialize(storageKryo())
+        assertEquals(logger.name, logger2.name)
+        assertTrue(logger === logger2)
+    }
+
+    @Test
+    fun `HashCheckingStream (de)serialize`() {
+        val rubbish = ByteArray(12345, { (it * it * 0.12345).toByte() })
+        val readRubbishStream: InputStream = NodeAttachmentService.HashCheckingStream(SecureHash.sha256(rubbish), rubbish.size, ByteArrayInputStream(rubbish)).serialize(kryo).deserialize(kryo)
+        for (i in 0..12344) {
+            assertEquals(rubbish[i], readRubbishStream.read().toByte())
+        }
+        assertEquals(-1, readRubbishStream.read())
     }
 
     @CordaSerializable

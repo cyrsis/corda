@@ -4,7 +4,9 @@ import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
 import io.requery.Persistable
 import io.requery.meta.EntityModel
-import io.requery.sql.*
+import io.requery.sql.KotlinEntityDataStore
+import io.requery.sql.SchemaModifier
+import io.requery.sql.TableCreationMode
 import net.corda.core.utilities.loggerFor
 import org.jetbrains.exposed.sql.transactions.TransactionManager
 import java.sql.Connection
@@ -38,7 +40,7 @@ class RequeryConfiguration(val properties: Properties, val useDefaultLogging: Bo
     fun makeSessionFactoryForModel(model: EntityModel): KotlinEntityDataStore<Persistable> {
         val configuration = KotlinConfigurationTransactionWrapper(model, dataSource, useDefaultLogging = this.useDefaultLogging)
         val tables = SchemaModifier(configuration)
-        val mode = TableCreationMode.DROP_CREATE
+        val mode = TableCreationMode.CREATE_NOT_EXISTS
         tables.createTables(mode)
         return KotlinEntityDataStore(configuration)
     }

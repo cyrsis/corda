@@ -1,9 +1,8 @@
 package net.corda.docs
 
+import net.corda.client.rpc.notUsed
 import net.corda.contracts.asset.Cash
 import net.corda.core.contracts.Amount
-import net.corda.core.contracts.Issued
-import net.corda.core.contracts.PartyAndReference
 import net.corda.core.contracts.USD
 import net.corda.core.messaging.CordaRPCOps
 import net.corda.core.messaging.startFlow
@@ -13,13 +12,15 @@ import net.corda.core.serialization.CordaSerializable
 import net.corda.core.serialization.OpaqueBytes
 import net.corda.core.serialization.SerializationCustomization
 import net.corda.core.transactions.SignedTransaction
+import net.corda.core.utilities.ALICE
+import net.corda.core.utilities.DUMMY_NOTARY
 import net.corda.flows.CashExitFlow
 import net.corda.flows.CashIssueFlow
 import net.corda.flows.CashPaymentFlow
 import net.corda.node.driver.driver
-import net.corda.node.services.User
 import net.corda.node.services.startFlowPermission
 import net.corda.node.services.transactions.ValidatingNotaryService
+import net.corda.nodeapi.User
 import org.graphstream.graph.Edge
 import org.graphstream.graph.Node
 import org.graphstream.graph.implementations.MultiGraph
@@ -48,8 +49,8 @@ fun main(args: Array<String>) {
             startFlowPermission<CashExitFlow>()))
 
     driver(driverDirectory = baseDirectory) {
-        startNode("Notary", advertisedServices = setOf(ServiceInfo(ValidatingNotaryService.type)))
-        val node = startNode("Alice", rpcUsers = listOf(user)).get()
+        startNode(DUMMY_NOTARY.name, advertisedServices = setOf(ServiceInfo(ValidatingNotaryService.type)))
+        val node = startNode(ALICE.name, rpcUsers = listOf(user)).get()
         // END 1
 
         // START 2
@@ -105,13 +106,16 @@ fun main(args: Array<String>) {
 
 // START 6
 fun generateTransactions(proxy: CordaRPCOps) {
-    var ownedQuantity = proxy.vaultAndUpdates().first.fold(0L) { sum, state ->
+    val (vault, vaultUpdates) = proxy.vaultAndUpdates()
+    vaultUpdates.notUsed()
+    var ownedQuantity = vault.fold(0L) { sum, state ->
         sum + (state.state.data as Cash.State).amount.quantity
     }
     val issueRef = OpaqueBytes.of(0)
-    val notary = proxy.networkMapUpdates().first.first { it.advertisedServices.any { it.info.type.isNotary() } }.notaryIdentity
+    val (parties, partyUpdates) = proxy.networkMapUpdates()
+    partyUpdates.notUsed()
+    val notary = parties.first { it.advertisedServices.any { it.info.type.isNotary() } }.notaryIdentity
     val me = proxy.nodeIdentity().legalIdentity
-    val meAndRef = PartyAndReference(me, issueRef)
     while (true) {
         Thread.sleep(1000)
         val random = SplittableRandom()
@@ -122,7 +126,7 @@ fun generateTransactions(proxy: CordaRPCOps) {
             ownedQuantity -= quantity
         } else if (ownedQuantity > 1000 && n < 0.7) {
             val quantity = Math.abs(random.nextLong() % Math.min(ownedQuantity, 2000))
-            proxy.startFlow(::CashPaymentFlow, Amount(quantity, Issued(meAndRef, USD)), me)
+            proxy.startFlow(::CashPaymentFlow, Amount(quantity, USD), me)
         } else {
             val quantity = Math.abs(random.nextLong() % 1000)
             proxy.startFlow(::CashIssueFlow, Amount(quantity, USD), issueRef, me, notary)

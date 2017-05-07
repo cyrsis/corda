@@ -30,7 +30,7 @@ object UpdateBusinessDayFlow {
 
     class Service(services: PluginServiceHub) {
         init {
-            services.registerFlowInitiator(Broadcast::class.java, ::UpdateBusinessDayHandler)
+            services.registerServiceFlow(Broadcast::class.java, ::UpdateBusinessDayHandler)
         }
     }
 
@@ -66,7 +66,7 @@ object UpdateBusinessDayFlow {
          */
         private fun getRecipients(): Iterable<NodeInfo> {
             val notaryNodes = serviceHub.networkMapCache.notaryNodes
-            val partyNodes = (serviceHub.networkMapCache.partyNodes - notaryNodes).sortedBy { it.legalIdentity.name }
+            val partyNodes = (serviceHub.networkMapCache.partyNodes - notaryNodes).sortedBy { it.legalIdentity.name.toString() }
             return notaryNodes + partyNodes
         }
 

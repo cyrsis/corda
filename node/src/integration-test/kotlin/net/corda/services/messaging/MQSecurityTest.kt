@@ -2,28 +2,30 @@ package net.corda.services.messaging
 
 import co.paralleluniverse.fibers.Suspendable
 import com.google.common.net.HostAndPort
+import net.corda.client.rpc.CordaRPCClientImpl
 import net.corda.core.crypto.Party
-import net.corda.core.crypto.composite
 import net.corda.core.crypto.generateKeyPair
+import net.corda.core.crypto.toBase58String
 import net.corda.core.flows.FlowLogic
 import net.corda.core.getOrThrow
 import net.corda.core.messaging.CordaRPCOps
 import net.corda.core.random63BitValue
 import net.corda.core.seconds
+import net.corda.core.utilities.ALICE
+import net.corda.core.utilities.BOB
 import net.corda.core.utilities.unwrap
 import net.corda.node.internal.Node
-import net.corda.node.services.User
-import net.corda.node.services.config.SSLConfiguration
-import net.corda.node.services.config.configureTestSSL
-import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.CLIENTS_PREFIX
-import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.INTERNAL_PREFIX
-import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.NETWORK_MAP_QUEUE
-import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.NOTIFICATIONS_ADDRESS
-import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.P2P_QUEUE
-import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.PEERS_PREFIX
-import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.RPC_QUEUE_REMOVALS_QUEUE
-import net.corda.node.services.messaging.ArtemisMessagingComponent.Companion.RPC_REQUESTS_QUEUE
-import net.corda.node.services.messaging.CordaRPCClientImpl
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.CLIENTS_PREFIX
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.INTERNAL_PREFIX
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.NETWORK_MAP_QUEUE
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.NOTIFICATIONS_ADDRESS
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.P2P_QUEUE
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.PEERS_PREFIX
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.RPC_QUEUE_REMOVALS_QUEUE
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.RPC_REQUESTS_QUEUE
+import net.corda.nodeapi.User
+import net.corda.nodeapi.config.SSLConfiguration
+import net.corda.testing.configureTestSSL
 import net.corda.testing.messaging.SimpleMQClient
 import net.corda.testing.node.NodeBasedTest
 import org.apache.activemq.artemis.api.core.ActiveMQNonExistentQueueException
@@ -35,6 +37,7 @@ import org.junit.Before
 import org.junit.Test
 import java.util.*
 import java.util.concurrent.locks.ReentrantLock
+import kotlin.test.assertEquals
 
 /**
  * Runs a series of MQ-related attacks against a node. Subclasses need to call [startAttacker] to connect
@@ -48,12 +51,14 @@ abstract class MQSecurityTest : NodeBasedTest() {
 
     @Before
     fun start() {
-        alice = startNode("Alice", rpcUsers = extraRPCUsers + rpcUser).getOrThrow()
-        attacker = clientTo(alice.configuration.artemisAddress)
+        alice = startNode(ALICE.name, rpcUsers = extraRPCUsers + rpcUser).getOrThrow()
+        attacker = createAttacker()
         startAttacker(attacker)
     }
 
     open val extraRPCUsers: List<User> get() = emptyList()
+
+    abstract fun createAttacker(): SimpleMQClient
 
     abstract fun startAttacker(attacker: SimpleMQClient)
 
@@ -80,14 +85,14 @@ abstract class MQSecurityTest : NodeBasedTest() {
     }
 
     @Test
-    fun `create queue for peer which has not been communciated with`() {
-        val bob = startNode("Bob").getOrThrow()
+    fun `create queue for peer which has not been communicated with`() {
+        val bob = startNode(BOB.name).getOrThrow()
         assertAllQueueCreationAttacksFail("$PEERS_PREFIX${bob.info.legalIdentity.owningKey.toBase58String()}")
     }
 
     @Test
     fun `create queue for unknown peer`() {
-        val invalidPeerQueue = "$PEERS_PREFIX${generateKeyPair().public.composite.toBase58String()}"
+        val invalidPeerQueue = "$PEERS_PREFIX${generateKeyPair().public.toBase58String()}"
         assertAllQueueCreationAttacksFail(invalidPeerQueue)
     }
 
@@ -110,12 +115,6 @@ abstract class MQSecurityTest : NodeBasedTest() {
     fun `consume message from logged in user's RPC queue`() {
         val user1Queue = loginToRPCAndGetClientQueue()
         assertConsumeAttackFails(user1Queue)
-    }
-
-    @Test
-    fun `send message on logged in user's RPC address`() {
-        val user1Queue = loginToRPCAndGetClientQueue()
-        assertSendAttackFails(user1Queue)
     }
 
     @Test
@@ -152,26 +151,26 @@ abstract class MQSecurityTest : NodeBasedTest() {
         assertAllQueueCreationAttacksFail(randomQueue)
     }
 
-    fun clientTo(target: HostAndPort, config: SSLConfiguration = configureTestSSL()): SimpleMQClient {
-        val client = SimpleMQClient(target, config)
+    fun clientTo(target: HostAndPort, sslConfiguration: SSLConfiguration? = configureTestSSL()): SimpleMQClient {
+        val client = SimpleMQClient(target, sslConfiguration)
         clients += client
         return client
     }
 
-    fun loginToRPC(target: HostAndPort, rpcUser: User): SimpleMQClient {
-        val client = clientTo(target)
+    fun loginToRPC(target: HostAndPort, rpcUser: User, sslConfiguration: SSLConfiguration? = null): SimpleMQClient {
+        val client = clientTo(target, sslConfiguration)
         client.loginToRPC(rpcUser)
         return client
     }
 
-    fun SimpleMQClient.loginToRPC(rpcUser: User): CordaRPCOps {
-        start(rpcUser.username, rpcUser.password)
+    fun SimpleMQClient.loginToRPC(rpcUser: User, enableSSL: Boolean = false): CordaRPCOps {
+        start(rpcUser.username, rpcUser.password, enableSSL)
         val clientImpl = CordaRPCClientImpl(session, ReentrantLock(), rpcUser.username)
         return clientImpl.proxyFor(CordaRPCOps::class.java, timeout = 1.seconds)
     }
 
     fun loginToRPCAndGetClientQueue(): String {
-        val rpcClient = loginToRPC(alice.configuration.artemisAddress, rpcUser)
+        val rpcClient = loginToRPC(alice.configuration.rpcAddress!!, rpcUser)
         val clientQueueQuery = SimpleString("$CLIENTS_PREFIX${rpcUser.username}.rpc.*")
         return rpcClient.session.addressQuery(clientQueueQuery).queueNames.single().toString()
     }
@@ -205,10 +204,12 @@ abstract class MQSecurityTest : NodeBasedTest() {
 
     fun assertSendAttackFails(address: String) {
         val message = attacker.createMessage()
+        assertEquals(true, attacker.producer.isBlockOnNonDurableSend)
         assertAttackFails(address, "SEND") {
             attacker.producer.send(address, message)
         }
-        // TODO Make sure no actual message is received
+        assertEquals(0, message.deliveryCount)
+        assertEquals(0, message.bodySize)
     }
 
     fun assertConsumeAttackFails(queue: String) {
@@ -228,8 +229,8 @@ abstract class MQSecurityTest : NodeBasedTest() {
     }
 
     private fun startBobAndCommunicateWithAlice(): Party {
-        val bob = startNode("Bob").getOrThrow()
-        bob.services.registerFlowInitiator(SendFlow::class.java, ::ReceiveFlow)
+        val bob = startNode(BOB.name).getOrThrow()
+        bob.services.registerServiceFlow(SendFlow::class.java, ::ReceiveFlow)
         val bobParty = bob.info.legalIdentity
         // Perform a protocol exchange to force the peer queue to be created
         alice.services.startFlow(SendFlow(bobParty, 0)).resultFuture.getOrThrow()

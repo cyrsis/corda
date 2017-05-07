@@ -5,19 +5,14 @@ import com.jcraft.jsch.*
 import com.jcraft.jsch.agentproxy.AgentProxy
 import com.jcraft.jsch.agentproxy.connector.SSHAgentConnector
 import com.jcraft.jsch.agentproxy.usocket.JNAUSocketFactory
-import kotlinx.support.jdk8.collections.parallelStream
-import kotlinx.support.jdk8.streams.toList
-import net.corda.core.createDirectories
-import net.corda.core.div
+import net.corda.client.rpc.CordaRPCClient
 import net.corda.core.messaging.CordaRPCOps
 import net.corda.node.driver.PortAllocation
-import net.corda.node.services.config.SSLConfiguration
-import net.corda.node.services.messaging.CordaRPCClient
 import org.slf4j.LoggerFactory
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
-import java.nio.file.Path
 import java.util.*
+import kotlin.streams.toList
 
 private val log = LoggerFactory.getLogger(ConnectionManager::class.java)
 
@@ -71,8 +66,6 @@ class ConnectionManager(private val username: String, private val jSch: JSch) {
             nodeHost: String,
             remoteMessagingPort: Int,
             localTunnelAddress: HostAndPort,
-            certificatesBaseDirectory: Path,
-            remoteCertificatesDirectory: Path,
             rpcUsername: String,
             rpcPassword: String
     ): NodeConnection {
@@ -84,22 +77,10 @@ class ConnectionManager(private val username: String, private val jSch: JSch) {
         log.info("Connected to $nodeHost!")
 
         log.info("Creating tunnel from $nodeHost:$remoteMessagingPort to $localTunnelAddress...")
-        session.setPortForwardingL(localTunnelAddress.port, localTunnelAddress.hostText, remoteMessagingPort)
+        session.setPortForwardingL(localTunnelAddress.port, localTunnelAddress.host, remoteMessagingPort)
         log.info("Tunnel created!")
 
-        val certificatesDirectory = certificatesBaseDirectory / nodeHost
-        val sslKeyStoreFileName = "sslkeystore.jks"
-        val trustStoreFileName = "truststore.jks"
-        log.info("Copying server certificates to $certificatesDirectory")
-        certificatesDirectory.createDirectories()
-        val channel = session.openChannel("sftp") as ChannelSftp
-        channel.connect()
-        channel.get((remoteCertificatesDirectory / sslKeyStoreFileName).toString(), certificatesDirectory.toString())
-        channel.get((remoteCertificatesDirectory / trustStoreFileName).toString(), certificatesDirectory.toString())
-        channel.disconnect()
-        log.info("Certificates copied!")
-
-        val connection = NodeConnection(nodeHost, session, localTunnelAddress, certificatesDirectory, rpcUsername, rpcPassword)
+        val connection = NodeConnection(nodeHost, session, localTunnelAddress, rpcUsername, rpcPassword)
         connection.startClient()
         return connection
     }
@@ -110,31 +91,27 @@ class ConnectionManager(private val username: String, private val jSch: JSch) {
  * safely cleaned up if an exception is thrown.
  *
  * @param username The UNIX username to use for SSH authentication.
- * @param nodeHostsAndCertificatesPaths The list of hosts and associated remote paths to the nodes' certificate directories.
+ * @param nodeHosts The list of hosts.
  * @param remoteMessagingPort The Artemis messaging port nodes are listening on.
  * @param tunnelPortAllocation A local port allocation strategy for creating SSH tunnels.
- * @param certificatesBaseDirectory A local directory to put downloaded certificates in.
  * @param withConnections An action to run once we're connected to the nodes.
  * @return The return value of [withConnections]
  */
 fun <A> connectToNodes(
         username: String,
-        nodeHostsAndCertificatesPaths: List<Pair<String, Path>>,
+        nodeHosts: List<String>,
         remoteMessagingPort: Int,
         tunnelPortAllocation: PortAllocation,
-        certificatesBaseDirectory: Path,
         rpcUsername: String,
         rpcPassword: String,
         withConnections: (List<NodeConnection>) -> A
 ): A {
     val manager = ConnectionManager(username, setupJSchWithSshAgent())
-    val connections = nodeHostsAndCertificatesPaths.parallelStream().map { nodeHostAndCertificatesPath ->
+    val connections = nodeHosts.parallelStream().map { nodeHost ->
         manager.connectToNode(
-                nodeHost = nodeHostAndCertificatesPath.first,
+                nodeHost = nodeHost,
                 remoteMessagingPort = remoteMessagingPort,
                 localTunnelAddress = tunnelPortAllocation.nextHostAndPort(),
-                certificatesBaseDirectory = certificatesBaseDirectory,
-                remoteCertificatesDirectory = nodeHostAndCertificatesPath.second,
                 rpcUsername = rpcUsername,
                 rpcPassword = rpcPassword
         )
@@ -157,17 +134,9 @@ class NodeConnection(
         val hostName: String,
         private val jSchSession: Session,
         private val localTunnelAddress: HostAndPort,
-        private val certificatesDirectory: Path,
         private val rpcUsername: String,
         private val rpcPassword: String
 ) : Closeable {
-
-    private val sslConfig = object : SSLConfiguration {
-        override val certificatesDirectory = this@NodeConnection.certificatesDirectory
-        override val keyStorePassword: String get() = "cordacadevpass"
-        override val trustStorePassword: String get() = "trustpass"
-    }
-
     private var client: CordaRPCClient? = null
     private var _proxy: CordaRPCOps? = null
     val proxy: CordaRPCOps get() = _proxy ?: throw IllegalStateException("proxy requested, but the client is not running")
@@ -202,7 +171,7 @@ class NodeConnection(
             return action()
         } finally {
             log.info("Starting new RPC proxy to $hostName, tunnel at $localTunnelAddress")
-            val newClient = CordaRPCClient(localTunnelAddress, sslConfig)
+            val newClient = CordaRPCClient(localTunnelAddress)
             // TODO expose these somehow?
             newClient.start(rpcUsername, rpcPassword)
             val newProxy = newClient.proxy()
@@ -213,7 +182,7 @@ class NodeConnection(
 
     fun startClient() {
         log.info("Creating RPC proxy to $hostName, tunnel at $localTunnelAddress")
-        val client = CordaRPCClient(localTunnelAddress, sslConfig)
+        val client = CordaRPCClient(localTunnelAddress)
         client.start(rpcUsername, rpcPassword)
         val proxy = client.proxy()
         log.info("Proxy created")

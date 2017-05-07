@@ -1,16 +1,14 @@
 package net.corda.core.node.services
 
-import com.google.common.annotations.VisibleForTesting
 import com.google.common.util.concurrent.ListenableFuture
 import net.corda.core.contracts.Contract
-import net.corda.core.crypto.CompositeKey
 import net.corda.core.crypto.Party
-import net.corda.core.messaging.MessagingService
-import net.corda.core.messaging.SingleMessageRecipient
 import net.corda.core.node.NodeInfo
 import net.corda.core.randomOrNull
 import net.corda.core.serialization.CordaSerializable
+import org.bouncycastle.asn1.x500.X500Name
 import rx.Observable
+import java.security.PublicKey
 
 /**
  * A network map contains lists of nodes on the network along with information about their identity keys, services
@@ -21,10 +19,12 @@ import rx.Observable
 interface NetworkMapCache {
 
     @CordaSerializable
-    sealed class MapChange(val node: NodeInfo) {
-        class Added(node: NodeInfo) : MapChange(node)
-        class Removed(node: NodeInfo) : MapChange(node)
-        class Modified(node: NodeInfo, val previousNode: NodeInfo) : MapChange(node)
+    sealed class MapChange {
+        abstract val node: NodeInfo
+
+        data class Added(override val node: NodeInfo) : MapChange()
+        data class Removed(override val node: NodeInfo) : MapChange()
+        data class Modified(override val node: NodeInfo, val previousNode: NodeInfo) : MapChange()
     }
 
     /** A list of all nodes the cache is aware of */
@@ -63,7 +63,7 @@ interface NetworkMapCache {
     fun getRecommended(type: ServiceType, contract: Contract, vararg party: Party): NodeInfo? = getNodesWithService(type).firstOrNull()
 
     /** Look up the node info for a legal name. */
-    fun getNodeByLegalName(name: String): NodeInfo? = partyNodes.singleOrNull { it.legalIdentity.name == name }
+    fun getNodeByLegalName(principal: X500Name): NodeInfo? = partyNodes.singleOrNull { it.legalIdentity.name == principal }
 
     /**
      * In general, nodes can advertise multiple identities: a legal identity, and separate identities for each of
@@ -72,20 +72,20 @@ interface NetworkMapCache {
      */
 
     /** Look up the node info for a specific peer key. */
-    fun getNodeByLegalIdentityKey(compositeKey: CompositeKey): NodeInfo?
+    fun getNodeByLegalIdentityKey(identityKey: PublicKey): NodeInfo?
 
-    /** Look up all nodes advertising the service owned by [compositeKey] */
-    fun getNodesByAdvertisedServiceIdentityKey(compositeKey: CompositeKey): List<NodeInfo> {
-        return partyNodes.filter { it.advertisedServices.any { it.identity.owningKey == compositeKey } }
+    /** Look up all nodes advertising the service owned by [publicKey] */
+    fun getNodesByAdvertisedServiceIdentityKey(publicKey: PublicKey): List<NodeInfo> {
+        return partyNodes.filter { it.advertisedServices.any { it.identity.owningKey == publicKey } }
     }
 
     /** Returns information about the party, which may be a specific node or a service */
     fun getPartyInfo(party: Party): PartyInfo?
 
     /** Gets a notary identity by the given name. */
-    fun getNotary(name: String): Party? {
+    fun getNotary(principal: X500Name): Party? {
         val notaryNode = notaryNodes.randomOrNull {
-            it.advertisedServices.any { it.info.type.isSubTypeOf(ServiceType.notary) && it.info.name == name }
+            it.advertisedServices.any { it.info.type.isSubTypeOf(ServiceType.notary) && it.info.name == principal }
         }
         return notaryNode?.notaryIdentity
     }
@@ -111,41 +111,10 @@ interface NetworkMapCache {
 
     /** Checks whether a given party is an advertised validating notary identity */
     fun isValidatingNotary(party: Party): Boolean {
-        return notaryNodes.any { it.notaryIdentity == party && it.advertisedServices.any { it.info.type.isValidatingNotary() }}
+        val notary = notaryNodes.firstOrNull { it.notaryIdentity == party }
+                ?: throw IllegalArgumentException("No notary found with identity $party. This is most likely caused " +
+                "by using the notary node's legal identity instead of its advertised notary identity. " +
+                "Your options are: ${notaryNodes.map { "\"${it.notaryIdentity.name}\"" }.joinToString()}.")
+        return notary.advertisedServices.any { it.info.type.isValidatingNotary() }
     }
-
-    /**
-     * Add a network map service; fetches a copy of the latest map from the service and subscribes to any further
-     * updates.
-     * @param net the network messaging service.
-     * @param networkMapAddress the network map service to fetch current state from.
-     * @param subscribe if the cache should subscribe to updates.
-     * @param ifChangedSinceVer an optional version number to limit updating the map based on. If the latest map
-     * version is less than or equal to the given version, no update is fetched.
-     */
-    fun addMapService(net: MessagingService, networkMapAddress: SingleMessageRecipient,
-                      subscribe: Boolean, ifChangedSinceVer: Int? = null): ListenableFuture<Unit>
-
-    /** Adds a node to the local cache (generally only used for adding ourselves). */
-    fun addNode(node: NodeInfo)
-
-    /** Removes a node from the local cache. */
-    fun removeNode(node: NodeInfo)
-
-    /**
-     * Deregister from updates from the given map service.
-     * @param net the network messaging service.
-     * @param service the network map service to fetch current state from.
-     */
-    fun deregisterForUpdates(net: MessagingService, service: NodeInfo): ListenableFuture<Unit>
-
-    /** For testing where the network map cache is manipulated marks the service as immediately ready. */
-    @VisibleForTesting
-    fun runWithoutMapService()
-}
-
-@CordaSerializable
-sealed class NetworkCacheError : Exception() {
-    /** Indicates a failure to deregister, because of a rejected request from the remote node */
-    class DeregistrationFailed : NetworkCacheError()
 }

@@ -15,7 +15,6 @@ import net.corda.core.contracts.StateRef
 import net.corda.core.crypto.AnonymousParty
 import net.corda.core.crypto.Party
 import net.corda.core.flows.FlowLogic
-import net.corda.core.messaging.Ack
 import net.corda.core.node.PluginServiceHub
 import net.corda.core.node.services.dealsWith
 import net.corda.core.serialization.CordaSerializable
@@ -24,6 +23,7 @@ import net.corda.core.utilities.unwrap
 import net.corda.flows.AbstractStateReplacementFlow.Proposal
 import net.corda.flows.StateReplacementException
 import net.corda.flows.TwoPartyDealFlow
+import net.corda.node.services.messaging.Ack
 import net.corda.vega.analytics.*
 import net.corda.vega.contracts.*
 import net.corda.vega.portfolio.Portfolio
@@ -54,7 +54,7 @@ object SimmFlow {
     class Requester(val otherParty: Party,
                     val valuationDate: LocalDate,
                     val existing: StateAndRef<PortfolioState>?)
-    : FlowLogic<RevisionedState<PortfolioState.Update>>() {
+        : FlowLogic<RevisionedState<PortfolioState.Update>>() {
         constructor(otherParty: Party, valuationDate: LocalDate) : this(otherParty, valuationDate, null)
 
         lateinit var myIdentity: Party
@@ -184,7 +184,7 @@ object SimmFlow {
      */
     class Service(services: PluginServiceHub) {
         init {
-            services.registerFlowInitiator(Requester::class.java, ::Receiver)
+            services.registerServiceFlow(Requester::class.java, ::Receiver)
         }
     }
 

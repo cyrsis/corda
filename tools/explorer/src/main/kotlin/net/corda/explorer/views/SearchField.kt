@@ -14,10 +14,9 @@ import javafx.scene.control.ListCell
 import javafx.scene.control.TextField
 import javafx.scene.input.MouseButton
 import javafx.scene.input.MouseEvent
-import net.corda.client.fxutils.ChosenList
-import net.corda.client.fxutils.map
-import tornadofx.UIComponent
-import tornadofx.observable
+import net.corda.client.jfx.utils.ChosenList
+import net.corda.client.jfx.utils.map
+import tornadofx.*
 
 /**
  * Generic search bar filters [ObservableList] with provided filterCriteria.

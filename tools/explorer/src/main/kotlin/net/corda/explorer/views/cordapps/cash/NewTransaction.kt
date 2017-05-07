@@ -12,23 +12,24 @@ import javafx.scene.layout.GridPane
 import javafx.scene.text.Font
 import javafx.scene.text.FontWeight
 import javafx.stage.Window
-import net.corda.client.fxutils.ChosenList
-import net.corda.client.fxutils.isNotNull
-import net.corda.client.fxutils.map
-import net.corda.client.fxutils.unique
-import net.corda.client.model.*
+import net.corda.client.jfx.model.*
+import net.corda.client.jfx.utils.ChosenList
+import net.corda.client.jfx.utils.isNotNull
+import net.corda.client.jfx.utils.map
+import net.corda.client.jfx.utils.unique
 import net.corda.core.contracts.Amount
-import net.corda.core.contracts.Issued
-import net.corda.core.contracts.PartyAndReference
+import net.corda.core.contracts.sumOrNull
 import net.corda.core.contracts.withoutIssuer
 import net.corda.core.crypto.AbstractParty
 import net.corda.core.crypto.Party
+import net.corda.core.crypto.commonName
 import net.corda.core.flows.FlowException
 import net.corda.core.getOrThrow
 import net.corda.core.messaging.startFlow
 import net.corda.core.node.NodeInfo
 import net.corda.core.serialization.OpaqueBytes
 import net.corda.core.then
+import net.corda.explorer.formatters.PartyNameFormatter
 import net.corda.explorer.model.CashTransaction
 import net.corda.explorer.model.IssuerModel
 import net.corda.explorer.model.ReportingCurrencyModel
@@ -146,10 +147,10 @@ class NewTransaction : Fragment() {
             when (it) {
                 executeButton -> when (transactionTypeCB.value) {
                     CashTransaction.Issue -> {
-                        CashFlowCommand.IssueCash(Amount(amount.value, currencyChoiceBox.value), issueRef, partyBChoiceBox.value.legalIdentity, notaries.first().notaryIdentity)
+                        CashFlowCommand.IssueCash(Amount.fromDecimal(amount.value, currencyChoiceBox.value), issueRef, partyBChoiceBox.value.legalIdentity, notaries.first().notaryIdentity)
                     }
-                    CashTransaction.Pay -> CashFlowCommand.PayCash(Amount(amount.value, Issued(PartyAndReference(issuerChoiceBox.value, issueRef), currencyChoiceBox.value)), partyBChoiceBox.value.legalIdentity)
-                    CashTransaction.Exit -> CashFlowCommand.ExitCash(Amount(amount.value, currencyChoiceBox.value), issueRef)
+                    CashTransaction.Pay -> CashFlowCommand.PayCash(Amount.fromDecimal(amount.value, currencyChoiceBox.value), partyBChoiceBox.value.legalIdentity)
+                    CashTransaction.Exit -> CashFlowCommand.ExitCash(Amount.fromDecimal(amount.value, currencyChoiceBox.value), issueRef)
                     else -> null
                 }
                 else -> null
@@ -168,7 +169,7 @@ class NewTransaction : Fragment() {
 
         // Party A textfield always display my identity name, not editable.
         partyATextField.isEditable = false
-        partyATextField.textProperty().bind(myIdentity.map { it?.legalIdentity?.name ?: "" })
+        partyATextField.textProperty().bind(myIdentity.map { it?.legalIdentity?.let { PartyNameFormatter.short.format(it.name) } ?: "" })
         partyALabel.textProperty().bind(transactionTypeCB.valueProperty().map { it?.partyNameA?.let { "$it : " } })
         partyATextField.visibleProperty().bind(transactionTypeCB.valueProperty().map { it?.partyNameA }.isNotNull())
 
@@ -177,17 +178,17 @@ class NewTransaction : Fragment() {
         partyBChoiceBox.apply {
             visibleProperty().bind(transactionTypeCB.valueProperty().map { it?.partyNameB }.isNotNull())
             items = parties.sorted()
-            converter = stringConverter { it?.legalIdentity?.name ?: "" }
+            converter = stringConverter { it?.legalIdentity?.let { PartyNameFormatter.short.format(it.name) } ?: "" }
         }
         // Issuer
         issuerLabel.visibleProperty().bind(transactionTypeCB.valueProperty().isNotNull)
         issuerChoiceBox.apply {
             items = issuers.map { it.legalIdentity }.unique().sorted()
-            converter = stringConverter { it.name }
+            converter = stringConverter { PartyNameFormatter.short.format(it.name) }
             visibleProperty().bind(transactionTypeCB.valueProperty().map { it == CashTransaction.Pay })
         }
         issuerTextField.apply {
-            textProperty().bind(myIdentity.map { it?.legalIdentity?.name })
+            textProperty().bind(myIdentity.map { it?.legalIdentity?.let { PartyNameFormatter.short.format(it.name) } })
             visibleProperty().bind(transactionTypeCB.valueProperty().map { it == CashTransaction.Issue || it == CashTransaction.Exit })
             isEditable = false
         }
@@ -210,8 +211,8 @@ class NewTransaction : Fragment() {
         availableAmount.textProperty()
                 .bind(Bindings.createStringBinding({
                     val filteredCash = cash.filtered { it.token.issuer.party as AbstractParty == issuer.value && it.token.product == currencyChoiceBox.value }
-                            .map { it.withoutIssuer().quantity }
-                    "${filteredCash.sum()} ${currencyChoiceBox.value?.currencyCode} Available"
+                            .map { it.withoutIssuer() }.sumOrNull()
+                    "${filteredCash ?: "None"} Available"
                 }, arrayOf(currencyChoiceBox.valueProperty(), issuerChoiceBox.valueProperty())))
         // Amount
         amountLabel.visibleProperty().bind(transactionTypeCB.valueProperty().isNotNull)

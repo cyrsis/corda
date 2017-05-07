@@ -4,11 +4,12 @@ import com.codahale.metrics.JmxReporter
 import com.google.common.net.HostAndPort
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import net.corda.core.*
+import com.google.common.util.concurrent.SettableFuture
+import net.corda.core.div
+import net.corda.core.flatMap
 import net.corda.core.messaging.RPCOps
-import net.corda.core.node.NodeVersionInfo
 import net.corda.core.node.ServiceHub
-import net.corda.core.node.Version
+import net.corda.core.node.VersionInfo
 import net.corda.core.node.services.ServiceInfo
 import net.corda.core.node.services.ServiceType
 import net.corda.core.node.services.UniquenessProvider
@@ -18,16 +19,18 @@ import net.corda.node.printBasicNodeInfo
 import net.corda.node.serialization.NodeClock
 import net.corda.node.services.RPCUserService
 import net.corda.node.services.RPCUserServiceImpl
-import net.corda.node.services.api.MessagingServiceInternal
 import net.corda.node.services.config.FullNodeConfiguration
-import net.corda.node.services.messaging.ArtemisMessagingComponent.NetworkMapAddress
 import net.corda.node.services.messaging.ArtemisMessagingServer
+import net.corda.node.services.messaging.MessagingService
 import net.corda.node.services.messaging.NodeMessagingClient
 import net.corda.node.services.transactions.PersistentUniquenessProvider
+import net.corda.node.services.transactions.RaftNonValidatingNotaryService
 import net.corda.node.services.transactions.RaftUniquenessProvider
 import net.corda.node.services.transactions.RaftValidatingNotaryService
 import net.corda.node.utilities.AddressUtils
 import net.corda.node.utilities.AffinityExecutor
+import net.corda.nodeapi.ArtemisMessagingComponent.NetworkMapAddress
+import org.bouncycastle.asn1.x500.X500Name
 import org.slf4j.Logger
 import java.io.RandomAccessFile
 import java.lang.management.ManagementFactory
@@ -47,15 +50,16 @@ import kotlin.concurrent.thread
  */
 class Node(override val configuration: FullNodeConfiguration,
            advertisedServices: Set<ServiceInfo>,
-           val nodeVersionInfo: NodeVersionInfo,
+           val versionInfo: VersionInfo,
            clock: Clock = NodeClock()) : AbstractNode(configuration, advertisedServices, clock) {
     companion object {
         private val logger = loggerFor<Node>()
     }
 
     override val log: Logger get() = logger
-    override val version: Version get() = nodeVersionInfo.version
+    override val platformVersion: Int get() = versionInfo.platformVersion
     override val networkMapAddress: NetworkMapAddress? get() = configuration.networkMapService?.address?.let(::NetworkMapAddress)
+    override fun makeTransactionVerifierService() = (net as NodeMessagingClient).verifierService
 
     // DISCUSSION
     //
@@ -106,44 +110,26 @@ class Node(override val configuration: FullNodeConfiguration,
 
     private lateinit var userService: RPCUserService
 
-    init {
-        checkVersionUnchanged()
-    }
-
-    /**
-     * Abort starting the node if an existing deployment with a different version is detected in the base directory.
-     */
-    private fun checkVersionUnchanged() {
-        val versionFile = configuration.baseDirectory / "version"
-        if (versionFile.exists()) {
-            val previousVersion = Version.parse(versionFile.readAllLines()[0])
-            check(nodeVersionInfo.version.major == previousVersion.major) {
-                "Major version change detected - current: ${nodeVersionInfo.version}, previous: $previousVersion. " +
-                        "Node upgrades across major versions are not yet supported."
-            }
-        }
-        versionFile.writeLines(listOf(nodeVersionInfo.version.toString()))
-    }
-
-    override fun makeMessagingService(): MessagingServiceInternal {
-        userService = RPCUserServiceImpl(configuration)
+    override fun makeMessagingService(): MessagingService {
+        userService = RPCUserServiceImpl(configuration.rpcUsers)
         val serverAddress = configuration.messagingServerAddress ?: makeLocalMessageBroker()
         val myIdentityOrNullIfNetworkMapService = if (networkMapAddress != null) obtainLegalIdentity().owningKey else null
         return NodeMessagingClient(
                 configuration,
-                nodeVersionInfo,
+                versionInfo,
                 serverAddress,
                 myIdentityOrNullIfNetworkMapService,
                 serverThread,
                 database,
-                networkMapRegistrationFuture)
+                networkMapRegistrationFuture,
+                services.monitoringService)
     }
 
     private fun makeLocalMessageBroker(): HostAndPort {
         with(configuration) {
-            val useHost = tryDetectIfNotPublicHost(artemisAddress.hostText)
-            val useAddress = useHost?.let { HostAndPort.fromParts(it, artemisAddress.port) } ?: artemisAddress
-            messageBroker = ArtemisMessagingServer(this, useAddress, services.networkMapCache, userService)
+            val useHost = tryDetectIfNotPublicHost(p2pAddress.host)
+            val useAddress = useHost?.let { HostAndPort.fromParts(it, p2pAddress.port) } ?: p2pAddress
+            messageBroker = ArtemisMessagingServer(this, useAddress, rpcAddress, services.networkMapCache, userService)
             return useAddress
         }
     }
@@ -192,8 +178,11 @@ class Node(override val configuration: FullNodeConfiguration,
 
     override fun makeUniquenessProvider(type: ServiceType): UniquenessProvider {
         return when (type) {
-            RaftValidatingNotaryService.type -> with(configuration) {
-                RaftUniquenessProvider(baseDirectory, notaryNodeAddress!!, notaryClusterAddresses, database, configuration)
+            RaftValidatingNotaryService.type, RaftNonValidatingNotaryService.type -> with(configuration) {
+                val provider = RaftUniquenessProvider(baseDirectory, notaryNodeAddress!!, notaryClusterAddresses, database, configuration)
+                provider.start()
+                runOnStop += Runnable { provider.stop() }
+                provider
             }
             else -> PersistentUniquenessProvider()
         }
@@ -221,12 +210,15 @@ class Node(override val configuration: FullNodeConfiguration,
                         "-tcpAllowOthers",
                         "-tcpDaemon",
                         "-key", "node", databaseName)
+                runOnStop += Runnable { server.stop() }
                 val url = server.start().url
                 printBasicNodeInfo("Database connection url is", "jdbc:h2:$url/node")
             }
         }
         super.initialiseDatabasePersistence(insideTransaction)
     }
+
+    val startupComplete: ListenableFuture<Unit> = SettableFuture.create()
 
     override fun start(): Node {
         alreadyRunningNodeCheck()
@@ -239,7 +231,7 @@ class Node(override val configuration: FullNodeConfiguration,
             JmxReporter.
                     forRegistry(services.monitoringService.metrics).
                     inDomain("net.corda").
-                    createsObjectNamesWith { type, domain, name ->
+                    createsObjectNamesWith { _, domain, name ->
                         // Make the JMX hierarchy a bit better organised.
                         val category = name.substringBefore('.')
                         val subName = name.substringAfter('.', "")
@@ -250,6 +242,8 @@ class Node(override val configuration: FullNodeConfiguration,
                     }.
                     build().
                     start()
+
+            (startupComplete as SettableFuture<Unit>).set(Unit)
         }
 
         shutdownThread = thread(start = false) {
@@ -324,4 +318,4 @@ class Node(override val configuration: FullNodeConfiguration,
 
 class ConfigurationException(message: String) : Exception(message)
 
-data class NetworkMapInfo(val address: HostAndPort, val legalName: String)
+data class NetworkMapInfo(val address: HostAndPort, val legalName: X500Name)

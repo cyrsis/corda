@@ -37,15 +37,15 @@ import java.util.*
 class ProgressTracker(vararg steps: Step) {
     @CordaSerializable
     sealed class Change {
-        class Position(val tracker: ProgressTracker, val newStep: Step) : Change() {
+        data class Position(val tracker: ProgressTracker, val newStep: Step) : Change() {
             override fun toString() = newStep.label
         }
 
-        class Rendering(val tracker: ProgressTracker, val ofStep: Step) : Change() {
+        data class Rendering(val tracker: ProgressTracker, val ofStep: Step) : Change() {
             override fun toString() = ofStep.label
         }
 
-        class Structural(val tracker: ProgressTracker, val parent: Step) : Change() {
+        data class Structural(val tracker: ProgressTracker, val parent: Step) : Change() {
             override fun toString() = "Structural step change in child of ${parent.label}"
         }
     }
@@ -55,19 +55,6 @@ class ProgressTracker(vararg steps: Step) {
     open class Step(open val label: String) {
         open val changes: Observable<Change> get() = Observable.empty()
         open fun childProgressTracker(): ProgressTracker? = null
-    }
-
-    /** This class makes it easier to relabel a step on the fly, to provide transient information. */
-    open inner class RelabelableStep(currentLabel: String) : Step(currentLabel) {
-        override val changes: BehaviorSubject<Change> = BehaviorSubject.create()
-
-        var currentLabel: String = currentLabel
-            set(value) {
-                field = value
-                changes.onNext(ProgressTracker.Change.Rendering(this@ProgressTracker, this@RelabelableStep))
-            }
-
-        override val label: String get() = currentLabel
     }
 
     // Sentinel objects. Overrides equals() to survive process restarts and serialization.
@@ -88,7 +75,7 @@ class ProgressTracker(vararg steps: Step) {
     @CordaSerializable
     private data class Child(val tracker: ProgressTracker, @Transient val subscription: Subscription?)
 
-    private val childProgressTrackers = HashMap<Step, Child>()
+    private val childProgressTrackers = mutableMapOf<Step, Child>()
 
     init {
         steps.forEach {
@@ -127,7 +114,7 @@ class ProgressTracker(vararg steps: Step) {
             curChangeSubscription?.unsubscribe()
             stepIndex = index
             _changes.onNext(Change.Position(this, steps[index]))
-            curChangeSubscription = currentStep.changes.subscribe( { _changes.onNext(it) }, { _changes.onError(it) })
+            curChangeSubscription = currentStep.changes.subscribe({ _changes.onNext(it) }, { _changes.onError(it) })
 
             if (currentStep == DONE) _changes.onCompleted()
         }

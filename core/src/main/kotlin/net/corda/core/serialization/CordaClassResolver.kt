@@ -26,10 +26,6 @@ fun makeNoWhitelistClassResolver(): ClassResolver {
 }
 
 class CordaClassResolver(val whitelist: ClassWhitelist) : DefaultClassResolver() {
-    companion object {
-        private val logger = loggerFor<CordaClassResolver>()
-    }
-
     /** Returns the registration for the specified class, or null if the class is not registered.  */
     override fun getRegistration(type: Class<*>): Registration? {
         return super.getRegistration(type) ?: checkClass(type)
@@ -47,9 +43,9 @@ class CordaClassResolver(val whitelist: ClassWhitelist) : DefaultClassResolver()
 
     private fun checkClass(type: Class<*>): Registration? {
         /** If call path has disabled whitelisting (see [CordaKryo.register]), just return without checking. */
-        if(!whitelistEnabled) return null
-         // Allow primitives, abstracts and interfaces
-        if (type.isPrimitive || type == Any::class.java || Modifier.isAbstract(type.modifiers) || type==String::class.java) return null
+        if (!whitelistEnabled) return null
+        // Allow primitives, abstracts and interfaces
+        if (type.isPrimitive || type == Any::class.java || Modifier.isAbstract(type.modifiers) || type == String::class.java) return null
         // If array, recurse on element type
         if (type.isArray) {
             return checkClass(type.componentType)
@@ -92,6 +88,24 @@ class CordaClassResolver(val whitelist: ClassWhitelist) : DefaultClassResolver()
         return type.interfaces.any { it.isAnnotationPresent(CordaSerializable::class.java) || hasAnnotationOnInterface(it) }
                 || (type.superclass != null && hasAnnotationOnInterface(type.superclass))
     }
+
+    // Need to clear out class names from attachments.
+    override fun reset() {
+        super.reset()
+        // Kryo creates a cache of class name to Class<*> which does not work so well with multiple class loaders.
+        // TODO: come up with a more efficient way.  e.g. segregate the name space by class loader.
+        if (nameToClass != null) {
+            val classesToRemove: MutableList<String> = ArrayList(nameToClass.size)
+            for (entry in nameToClass.entries()) {
+                if (entry.value.classLoader is AttachmentsClassLoader) {
+                    classesToRemove += entry.key
+                }
+            }
+            for (className in classesToRemove) {
+                nameToClass.remove(className)
+            }
+        }
+    }
 }
 
 interface ClassWhitelist {
@@ -129,10 +143,14 @@ class GlobalTransientClassWhiteList(val delegate: ClassWhitelist) : MutableClass
     }
 }
 
+
 /**
  * This class is not currently used, but can be installed to log a large number of missing entries from the whitelist
  * and was used to track down the initial set.
+ *
+ * @suppress
  */
+@Suppress("unused")
 class LoggingWhitelist(val delegate: ClassWhitelist, val global: Boolean = true) : MutableClassWhitelist {
     companion object {
         val log = loggerFor<LoggingWhitelist>()
@@ -160,9 +178,7 @@ class LoggingWhitelist(val delegate: ClassWhitelist, val global: Boolean = true)
             alreadySeen += type.name
             val className = Util.className(type)
             log.warn("Dynamically whitelisted class $className")
-            if (journalWriter != null) {
-                journalWriter.println(className)
-            }
+            journalWriter?.println(className)
         }
         return true
     }

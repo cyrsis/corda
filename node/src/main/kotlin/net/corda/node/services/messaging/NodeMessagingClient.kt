@@ -3,21 +3,34 @@ package net.corda.node.services.messaging
 import com.google.common.net.HostAndPort
 import com.google.common.util.concurrent.ListenableFuture
 import net.corda.core.ThreadBox
-import net.corda.core.crypto.CompositeKey
-import net.corda.core.messaging.*
-import net.corda.core.node.NodeVersionInfo
+import net.corda.core.messaging.CordaRPCOps
+import net.corda.core.messaging.MessageRecipients
+import net.corda.core.messaging.RPCOps
+import net.corda.core.messaging.SingleMessageRecipient
+import net.corda.core.node.VersionInfo
 import net.corda.core.node.services.PartyInfo
+import net.corda.core.node.services.TransactionVerifierService
+import net.corda.core.random63BitValue
 import net.corda.core.serialization.SerializedBytes
 import net.corda.core.serialization.opaque
 import net.corda.core.success
+import net.corda.core.transactions.LedgerTransaction
 import net.corda.core.utilities.loggerFor
 import net.corda.core.utilities.trace
 import net.corda.node.services.RPCUserService
-import net.corda.node.services.api.MessagingServiceInternal
+import net.corda.node.services.api.MonitoringService
 import net.corda.node.services.config.NodeConfiguration
-import net.corda.node.services.messaging.ArtemisMessagingComponent.ConnectionDirection.Outbound
+import net.corda.node.services.config.VerifierType
 import net.corda.node.services.statemachine.StateMachineManager
+import net.corda.node.services.transactions.InMemoryTransactionVerifierService
+import net.corda.node.services.transactions.OutOfProcessTransactionVerifierService
 import net.corda.node.utilities.*
+import net.corda.nodeapi.ArtemisMessagingComponent
+import net.corda.nodeapi.ArtemisTcpTransport
+import net.corda.nodeapi.ConnectionDirection
+import net.corda.nodeapi.VerifierApi
+import net.corda.nodeapi.VerifierApi.VERIFICATION_REQUESTS_QUEUE_NAME
+import net.corda.nodeapi.VerifierApi.VERIFICATION_RESPONSES_QUEUE_NAME_PREFIX
 import org.apache.activemq.artemis.api.core.ActiveMQObjectClosedException
 import org.apache.activemq.artemis.api.core.Message.*
 import org.apache.activemq.artemis.api.core.SimpleString
@@ -27,10 +40,10 @@ import org.bouncycastle.asn1.x500.X500Name
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.statements.InsertStatement
+import java.security.PublicKey
 import java.time.Instant
 import java.util.*
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.*
 import javax.annotation.concurrent.ThreadSafe
 
 // TODO: Stop the wallet explorer and other clients from using this class and get rid of persistentInbox
@@ -55,12 +68,14 @@ import javax.annotation.concurrent.ThreadSafe
  */
 @ThreadSafe
 class NodeMessagingClient(override val config: NodeConfiguration,
-                          nodeVersionInfo: NodeVersionInfo,
+                          val versionInfo: VersionInfo,
                           val serverHostPort: HostAndPort,
-                          val myIdentity: CompositeKey?,
+                          val myIdentity: PublicKey?,
                           val nodeExecutor: AffinityExecutor,
                           val database: Database,
-                          val networkMapRegistrationFuture: ListenableFuture<Unit>) : ArtemisMessagingComponent(), MessagingServiceInternal {
+                          val networkMapRegistrationFuture: ListenableFuture<Unit>,
+                          val monitoringService: MonitoringService
+) : ArtemisMessagingComponent(), MessagingService {
     companion object {
         private val log = loggerFor<NodeMessagingClient>()
 
@@ -70,9 +85,13 @@ class NodeMessagingClient(override val config: NodeConfiguration,
         // confusion.
         private val topicProperty = SimpleString("platform-topic")
         private val sessionIdProperty = SimpleString("session-id")
-        private val nodeVersionProperty = SimpleString("node-version")
-        private val nodeVendorProperty = SimpleString("node-vendor")
-        private val amqDelay: Int = Integer.valueOf(System.getProperty("amq.delivery.delay.ms", "0"))
+        private val cordaVendorProperty = SimpleString("corda-vendor")
+        private val releaseVersionProperty = SimpleString("release-version")
+        private val platformVersionProperty = SimpleString("platform-version")
+        private val amqDelayMillis = System.getProperty("amq.delivery.delay.ms", "0").toInt()
+        private val verifierResponseAddress = "$VERIFICATION_RESPONSES_QUEUE_NAME_PREFIX.${random63BitValue()}"
+
+        private val messageMaxRetryCount: Int = 3
     }
 
     private class InnerState {
@@ -86,14 +105,26 @@ class NodeMessagingClient(override val config: NodeConfiguration,
         // Consumer for inbound client RPC messages.
         var rpcConsumer: ClientConsumer? = null
         var rpcNotificationConsumer: ClientConsumer? = null
+        var verificationResponseConsumer: ClientConsumer? = null
+    }
+
+    val messagesToRedeliver = database.transaction {
+        JDBCHashMap<Long, Pair<Message, MessageRecipients>>("${NODE_DATABASE_PREFIX}message_retry", true)
+    }
+
+    val scheduledMessageRedeliveries = ConcurrentHashMap<Long, ScheduledFuture<*>>()
+
+    val verifierService = when (config.verifierType) {
+        VerifierType.InMemory -> InMemoryTransactionVerifierService(numberOfWorkers = 4)
+        VerifierType.OutOfProcess -> createOutOfProcessVerifierService()
     }
 
     /** A registration to handle messages of different types */
     data class Handler(val topicSession: TopicSession,
                        val callback: (ReceivedMessage, MessageHandlerRegistration) -> Unit) : MessageHandlerRegistration
 
-    private val nodeVendor = SimpleString(nodeVersionInfo.vendor)
-    private val version = SimpleString(nodeVersionInfo.version.toString())
+    private val cordaVendor = SimpleString(versionInfo.vendor)
+    private val releaseVersion = SimpleString(versionInfo.releaseVersion)
     /** An executor for sending messages */
     private val messagingExecutor = AffinityExecutor.ServiceAffinityExecutor("Messaging", 1)
 
@@ -129,8 +160,9 @@ class NodeMessagingClient(override val config: NodeConfiguration,
 
             log.info("Connecting to server: $serverHostPort")
             // TODO Add broker CN to config for host verification in case the embedded broker isn't used
-            val tcpTransport = tcpTransport(Outbound(), serverHostPort.hostText, serverHostPort.port)
+            val tcpTransport = ArtemisTcpTransport.tcpTransport(ConnectionDirection.Outbound(), serverHostPort, config)
             val locator = ActiveMQClient.createServerLocatorWithoutHA(tcpTransport)
+            locator.minLargeMessageSize = ArtemisMessagingServer.MAX_FILE_SIZE
             clientFactory = locator.createSessionFactory()
 
             // Login using the node username. The broker will authentiate us as its node (as opposed to another peer)
@@ -161,7 +193,22 @@ class NodeMessagingClient(override val config: NodeConfiguration,
             rpcConsumer = session.createConsumer(RPC_REQUESTS_QUEUE)
             rpcNotificationConsumer = session.createConsumer(RPC_QUEUE_REMOVALS_QUEUE)
             rpcDispatcher = createRPCDispatcher(rpcOps, userService, config.myLegalName)
+
+            fun checkVerifierCount() {
+                if (session.queueQuery(SimpleString(VERIFICATION_REQUESTS_QUEUE_NAME)).consumerCount == 0) {
+                    log.warn("No connected verifier listening on $VERIFICATION_REQUESTS_QUEUE_NAME!")
+                }
+            }
+
+            if (config.verifierType == VerifierType.OutOfProcess) {
+                createQueueIfAbsent(VerifierApi.VERIFICATION_REQUESTS_QUEUE_NAME)
+                createQueueIfAbsent(verifierResponseAddress)
+                verificationResponseConsumer = session.createConsumer(verifierResponseAddress)
+                messagingExecutor.scheduleAtFixedRate(::checkVerifierCount, 0, 10, TimeUnit.SECONDS)
+            }
         }
+
+        resumeMessageRedelivery()
     }
 
     /**
@@ -176,6 +223,12 @@ class NodeMessagingClient(override val config: NodeConfiguration,
             session.createConsumer(P2P_QUEUE, messageFilter)
         } else
             session.createConsumer(P2P_QUEUE)
+    }
+
+    private fun resumeMessageRedelivery() {
+        messagesToRedeliver.forEach {
+            retryId, (message, target) -> send(message, target, retryId)
+        }
     }
 
     private var shutdownLatch = CountDownLatch(1)
@@ -222,6 +275,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
             check(!running) { "run can't be called twice" }
             running = true
             rpcDispatcher!!.start(rpcConsumer!!, rpcNotificationConsumer!!, nodeExecutor)
+            (verifierService as? OutOfProcessTransactionVerifierService)?.start(verificationResponseConsumer!!)
             p2pConsumer!!
         }
 
@@ -258,23 +312,13 @@ class NodeMessagingClient(override val config: NodeConfiguration,
         try {
             val topic = message.required(topicProperty) { getStringProperty(it) }
             val sessionID = message.required(sessionIdProperty) { getLongProperty(it) }
+            val user = requireNotNull(message.getStringProperty(HDR_VALIDATED_USER)) { "Message is not authenticated" }
+            val platformVersion = message.required(platformVersionProperty) { getIntProperty(it) }
             // Use the magic deduplication property built into Artemis as our message identity too
             val uuid = message.required(HDR_DUPLICATE_DETECTION_ID) { UUID.fromString(message.getStringProperty(it)) }
-            val user = requireNotNull(message.getStringProperty(HDR_VALIDATED_USER)) { "Message is not authenticated" }
             log.trace { "Received message from: ${message.address} user: $user topic: $topic sessionID: $sessionID uuid: $uuid" }
 
-            val body = ByteArray(message.bodySize).apply { message.bodyBuffer.readBytes(this) }
-
-            val msg = object : ReceivedMessage {
-                override val topicSession = TopicSession(topic, sessionID)
-                override val data: ByteArray = body
-                override val peer: X500Name = X500Name(user)
-                override val debugTimestamp: Instant = Instant.ofEpochMilli(message.timestamp)
-                override val uniqueMessageId: UUID = uuid
-                override fun toString() = "$topic#${data.opaque()}"
-            }
-
-            return msg
+            return ArtemisReceivedMessage(TopicSession(topic, sessionID), X500Name(user), platformVersion, uuid, message)
         } catch (e: Exception) {
             log.error("Unable to process message, ignoring it: $message", e)
             return null
@@ -284,6 +328,16 @@ class NodeMessagingClient(override val config: NodeConfiguration,
     private inline fun <T> ClientMessage.required(key: SimpleString, extractor: ClientMessage.(SimpleString) -> T): T {
         require(containsProperty(key)) { "Missing $key" }
         return extractor(key)
+    }
+
+    private class ArtemisReceivedMessage(override val topicSession: TopicSession,
+                                         override val peer: X500Name,
+                                         override val platformVersion: Int,
+                                         override val uniqueMessageId: UUID,
+                                         private val message: ClientMessage) : ReceivedMessage {
+        override val data: ByteArray by lazy { ByteArray(message.bodySize).apply { message.bodyBuffer.readBytes(this) } }
+        override val debugTimestamp: Instant get() = Instant.ofEpochMilli(message.timestamp)
+        override fun toString() = "${topicSession.topic}#${data.opaque()}"
     }
 
     private fun deliver(msg: ReceivedMessage): Boolean {
@@ -301,7 +355,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
             // Note that handlers may re-enter this class. We aren't holding any locks and methods like
             // start/run/stop have re-entrancy assertions at the top, so it is OK.
             nodeExecutor.fetchFrom {
-                databaseTransaction(database) {
+                database.transaction {
                     if (msg.uniqueMessageId in processedMessages) {
                         log.trace { "Discard duplicate message ${msg.uniqueMessageId} for ${msg.topicSession}" }
                     } else {
@@ -365,15 +419,16 @@ class NodeMessagingClient(override val config: NodeConfiguration,
         }
     }
 
-    override fun send(message: Message, target: MessageRecipients) {
+    override fun send(message: Message, target: MessageRecipients, retryId: Long?) {
         // We have to perform sending on a different thread pool, since using the same pool for messaging and
         // fibers leads to Netty buffer memory leaks, caused by both Netty and Quasar fiddling with thread-locals.
         messagingExecutor.fetchFrom {
             state.locked {
                 val mqAddress = getMQAddress(target)
                 val artemisMessage = session!!.createMessage(true).apply {
-                    putStringProperty(nodeVendorProperty, nodeVendor)
-                    putStringProperty(nodeVersionProperty, version)
+                    putStringProperty(cordaVendorProperty, cordaVendor)
+                    putStringProperty(releaseVersionProperty, releaseVersion)
+                    putIntProperty(platformVersionProperty, versionInfo.platformVersion)
                     putStringProperty(topicProperty, SimpleString(message.topicSession.topic))
                     putLongProperty(sessionIdProperty, message.topicSession.sessionID)
                     writeBodyBufferBytes(message.data)
@@ -381,14 +436,61 @@ class NodeMessagingClient(override val config: NodeConfiguration,
                     putStringProperty(HDR_DUPLICATE_DETECTION_ID, SimpleString(message.uniqueMessageId.toString()))
 
                     // For demo purposes - if set then add a delay to messages in order to demonstrate that the flows are doing as intended
-                    if (amqDelay > 0 && message.topicSession.topic == StateMachineManager.sessionTopic.topic) {
-                        putLongProperty(HDR_SCHEDULED_DELIVERY_TIME, System.currentTimeMillis() + amqDelay)
+                    if (amqDelayMillis > 0 && message.topicSession.topic == StateMachineManager.sessionTopic.topic) {
+                        putLongProperty(HDR_SCHEDULED_DELIVERY_TIME, System.currentTimeMillis() + amqDelayMillis)
                     }
                 }
-                log.trace { "Send to: $mqAddress topic: ${message.topicSession.topic} " +
-                        "sessionID: ${message.topicSession.sessionID} uuid: ${message.uniqueMessageId}" }
+                log.trace {
+                    "Send to: $mqAddress topic: ${message.topicSession.topic} " +
+                            "sessionID: ${message.topicSession.sessionID} uuid: ${message.uniqueMessageId}"
+                }
                 producer!!.send(mqAddress, artemisMessage)
+
+                retryId?.let {
+                    database.transaction {
+                        messagesToRedeliver.computeIfAbsent(it, { Pair(message, target) })
+                    }
+                    scheduledMessageRedeliveries[it] = messagingExecutor.schedule({
+                        sendWithRetry(0, mqAddress, artemisMessage, it)
+                    }, config.messageRedeliveryDelaySeconds.toLong(), TimeUnit.SECONDS)
+
+                }
             }
+        }
+    }
+
+    private fun sendWithRetry(retryCount: Int, address: String, message: ClientMessage, retryId: Long) {
+        fun randomiseDuplicateId(message: ClientMessage) {
+            message.putStringProperty(HDR_DUPLICATE_DETECTION_ID, SimpleString(UUID.randomUUID().toString()))
+        }
+
+        log.trace { "Attempting to retry #$retryCount message delivery for $retryId" }
+        if (retryCount >= messageMaxRetryCount) {
+            log.warn("Reached the maximum number of retries ($messageMaxRetryCount) for message $message redelivery to $address")
+            scheduledMessageRedeliveries.remove(retryId)
+            return
+        }
+
+        randomiseDuplicateId(message)
+
+        state.locked {
+            log.trace { "Retry #$retryCount sending message $message to $address for $retryId" }
+            producer!!.send(address, message)
+        }
+
+        scheduledMessageRedeliveries[retryId] = messagingExecutor.schedule({
+            sendWithRetry(retryCount + 1, address, message, retryId)
+        }, config.messageRedeliveryDelaySeconds.toLong(), TimeUnit.SECONDS)
+    }
+
+    override fun cancelRedelivery(retryId: Long) {
+        database.transaction {
+            messagesToRedeliver.remove(retryId)
+        }
+        scheduledMessageRedeliveries[retryId]?.let {
+            log.trace { "Cancelling message redelivery for retry id $retryId" }
+            if (!it.isDone) it.cancel(true)
+            scheduledMessageRedeliveries.remove(retryId)
         }
     }
 
@@ -445,7 +547,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
         }
     }
 
-    private fun createRPCDispatcher(ops: RPCOps, userService: RPCUserService, nodeLegalName: String) =
+    private fun createRPCDispatcher(ops: RPCOps, userService: RPCUserService, nodeLegalName: X500Name): RPCDispatcher =
             object : RPCDispatcher(ops, userService, nodeLegalName) {
                 override fun send(data: SerializedBytes<*>, toAddress: String) {
                     messagingExecutor.fetchFrom {
@@ -460,6 +562,23 @@ class NodeMessagingClient(override val config: NodeConfiguration,
                     }
                 }
             }
+
+    private fun createOutOfProcessVerifierService(): TransactionVerifierService {
+        return object : OutOfProcessTransactionVerifierService(monitoringService) {
+            override fun sendRequest(nonce: Long, transaction: LedgerTransaction) {
+                messagingExecutor.fetchFrom {
+                    state.locked {
+                        val message = session!!.createMessage(false)
+                        val request = VerifierApi.VerificationRequest(nonce, transaction, SimpleString(verifierResponseAddress))
+                        request.writeToClientMessage(message)
+                        producer!!.send(VERIFICATION_REQUESTS_QUEUE_NAME, message)
+                    }
+                }
+            }
+
+        }
+    }
+
 
     override fun getAddressOfParty(partyInfo: PartyInfo): MessageRecipients {
         return when (partyInfo) {

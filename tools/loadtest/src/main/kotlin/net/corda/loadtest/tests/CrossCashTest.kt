@@ -2,17 +2,15 @@ package net.corda.loadtest.tests
 
 import net.corda.client.mock.Generator
 import net.corda.client.mock.pickN
+import net.corda.client.rpc.notUsed
 import net.corda.contracts.asset.Cash
-import net.corda.core.*
 import net.corda.core.contracts.Issued
 import net.corda.core.contracts.PartyAndReference
 import net.corda.core.contracts.USD
 import net.corda.core.crypto.AbstractParty
-import net.corda.core.crypto.AnonymousParty
-import net.corda.core.flows.FlowException
-import net.corda.core.messaging.startFlow
+import net.corda.core.failure
 import net.corda.core.serialization.OpaqueBytes
-import net.corda.flows.CashException
+import net.corda.core.success
 import net.corda.flows.CashFlowCommand
 import net.corda.loadtest.LoadTest
 import net.corda.loadtest.NodeHandle
@@ -125,7 +123,7 @@ val crossCashTest = LoadTest<CrossCashCommand, CrossCashState>(
                             val quantities = state.nodeVaults[node.info.legalIdentity] ?: mapOf()
                             val possibleRecipients = nodeMap.keys.toList()
                             val moves = quantities.map {
-                                it.value.toDouble() / 1000 to generateMove(it.value, USD, it.key.toAnonymous(), possibleRecipients)
+                                it.value.toDouble() / 1000 to generateMove(it.value, USD, node.info.legalIdentity, possibleRecipients)
                             }
                             val exits = quantities.mapNotNull {
                                 if (it.key == node.info.legalIdentity) {
@@ -160,26 +158,26 @@ val crossCashTest = LoadTest<CrossCashCommand, CrossCashState>(
                     val newDiffQueues = state.copyQueues()
                     val recipientOriginators = newDiffQueues.getOrPut(command.command.recipient, { HashMap() })
                     val senderQuantities = newNodeVaults[command.node.info.legalIdentity]!!
-                    val quantity = command.command.amount.quantity
-                    val issuer = command.command.amount.token.issuer.party
+                    val amount = command.command.amount
+                    val issuer = command.command.issuerConstraint!!
                     val originator = command.node.info.legalIdentity
                     val senderQuantity = senderQuantities[issuer] ?: throw Exception(
                             "Generated payment of ${command.command.amount} from ${command.node.info.legalIdentity}, " +
                                     "however there is no cash from $issuer!"
                     )
-                    if (senderQuantity < quantity) {
+                    if (senderQuantity < amount.quantity) {
                         throw Exception(
                                 "Generated payment of ${command.command.amount} from ${command.node.info.legalIdentity}, " +
                                         "however they only have $senderQuantity!"
                         )
                     }
-                    if (senderQuantity == quantity) {
+                    if (senderQuantity == amount.quantity) {
                         senderQuantities.remove(issuer)
                     } else {
-                        senderQuantities.put(issuer, senderQuantity - quantity)
+                        senderQuantities.put(issuer, senderQuantity - amount.quantity)
                     }
                     val recipientQueue = recipientOriginators.getOrPut(originator, { ArrayList() })
-                    recipientQueue.add(Pair(issuer, quantity))
+                    recipientQueue.add(Pair(issuer, amount.quantity))
                     CrossCashState(newNodeVaults, newDiffQueues)
                 }
                 is CashFlowCommand.ExitCash -> {
@@ -221,7 +219,8 @@ val crossCashTest = LoadTest<CrossCashCommand, CrossCashState>(
             val currentNodeVaults = HashMap<AbstractParty, HashMap<AbstractParty, Long>>()
             simpleNodes.forEach {
                 val quantities = HashMap<AbstractParty, Long>()
-                val vault = it.connection.proxy.vaultAndUpdates().first
+                val (vault, vaultUpdates) = it.connection.proxy.vaultAndUpdates()
+                vaultUpdates.notUsed()
                 vault.forEach {
                     val state = it.state.data
                     if (state is Cash.State) {
