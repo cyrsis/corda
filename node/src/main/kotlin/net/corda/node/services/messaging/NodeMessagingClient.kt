@@ -11,7 +11,6 @@ import net.corda.core.node.VersionInfo
 import net.corda.core.node.services.PartyInfo
 import net.corda.core.node.services.TransactionVerifierService
 import net.corda.core.random63BitValue
-import net.corda.core.serialization.SerializedBytes
 import net.corda.core.serialization.opaque
 import net.corda.core.success
 import net.corda.core.transactions.LedgerTransaction
@@ -36,6 +35,7 @@ import org.apache.activemq.artemis.api.core.Message.*
 import org.apache.activemq.artemis.api.core.SimpleString
 import org.apache.activemq.artemis.api.core.client.*
 import org.apache.activemq.artemis.api.core.client.ActiveMQClient.DEFAULT_ACK_BATCH_SIZE
+import org.apache.activemq.artemis.api.core.management.ActiveMQServerControl
 import org.bouncycastle.asn1.x500.X500Name
 import org.jetbrains.exposed.sql.Database
 import org.jetbrains.exposed.sql.ResultRow
@@ -61,20 +61,22 @@ import javax.annotation.concurrent.ThreadSafe
  * invoke methods on the provided implementation. There is more documentation on this in the docsite and the
  * CordaRPCClient class.
  *
- * @param serverHostPort The address of the broker instance to connect to (might be running in the same process)
+ * @param serverHostPort The address of the broker instance to connect to (might be running in the same process).
  * @param myIdentity Either the public key to be used as the ArtemisMQ address and queue name for the node globally, or null to indicate
- * that this is a NetworkMapService node which will be bound globally to the name "networkmap"
+ * that this is a NetworkMapService node which will be bound globally to the name "networkmap".
  * @param nodeExecutor An executor to run received message tasks upon.
+ * @param isServerLocal Specify `true` if the provided [serverHostPort] is a locally running broker instance.
  */
 @ThreadSafe
 class NodeMessagingClient(override val config: NodeConfiguration,
                           val versionInfo: VersionInfo,
                           val serverHostPort: HostAndPort,
                           val myIdentity: PublicKey?,
-                          val nodeExecutor: AffinityExecutor,
+                          val nodeExecutor: AffinityExecutor.ServiceAffinityExecutor,
                           val database: Database,
                           val networkMapRegistrationFuture: ListenableFuture<Unit>,
-                          val monitoringService: MonitoringService
+                          val monitoringService: MonitoringService,
+                          val isServerLocal: Boolean = true
 ) : ArtemisMessagingComponent(), MessagingService {
     companion object {
         private val log = loggerFor<NodeMessagingClient>()
@@ -100,11 +102,9 @@ class NodeMessagingClient(override val config: NodeConfiguration,
         var producer: ClientProducer? = null
         var p2pConsumer: ClientConsumer? = null
         var session: ClientSession? = null
-        var clientFactory: ClientSessionFactory? = null
-        var rpcDispatcher: RPCDispatcher? = null
+        var sessionFactory: ClientSessionFactory? = null
+        var rpcServer: RPCServer? = null
         // Consumer for inbound client RPC messages.
-        var rpcConsumer: ClientConsumer? = null
-        var rpcNotificationConsumer: ClientConsumer? = null
         var verificationResponseConsumer: ClientConsumer? = null
     }
 
@@ -158,23 +158,26 @@ class NodeMessagingClient(override val config: NodeConfiguration,
             check(!started) { "start can't be called twice" }
             started = true
 
-            log.info("Connecting to server: $serverHostPort")
+            val serverAddress = getBrokerAddress()
+
+            log.info("Connecting to server: $serverAddress")
             // TODO Add broker CN to config for host verification in case the embedded broker isn't used
-            val tcpTransport = ArtemisTcpTransport.tcpTransport(ConnectionDirection.Outbound(), serverHostPort, config)
+            val tcpTransport = ArtemisTcpTransport.tcpTransport(ConnectionDirection.Outbound(), serverAddress, config)
             val locator = ActiveMQClient.createServerLocatorWithoutHA(tcpTransport)
             locator.minLargeMessageSize = ArtemisMessagingServer.MAX_FILE_SIZE
-            clientFactory = locator.createSessionFactory()
+            sessionFactory = locator.createSessionFactory()
 
             // Login using the node username. The broker will authentiate us as its node (as opposed to another peer)
             // using our TLS certificate.
             // Note that the acknowledgement of messages is not flushed to the Artermis journal until the default buffer
             // size of 1MB is acknowledged.
-            val session = clientFactory!!.createSession(NODE_USER, NODE_USER, false, true, true, locator.isPreAcknowledge, DEFAULT_ACK_BATCH_SIZE)
+            val session = sessionFactory!!.createSession(NODE_USER, NODE_USER, false, true, true, locator.isPreAcknowledge, DEFAULT_ACK_BATCH_SIZE)
             this.session = session
             session.start()
 
             // Create a general purpose producer.
-            producer = session.createProducer()
+            val producer = session.createProducer()
+            this.producer = producer
 
             // Create a queue, consumer and producer for handling P2P network messages.
             p2pConsumer = makeP2PConsumer(session, true)
@@ -190,9 +193,7 @@ class NodeMessagingClient(override val config: NodeConfiguration,
                 }
             }
 
-            rpcConsumer = session.createConsumer(RPC_REQUESTS_QUEUE)
-            rpcNotificationConsumer = session.createConsumer(RPC_QUEUE_REMOVALS_QUEUE)
-            rpcDispatcher = createRPCDispatcher(rpcOps, userService, config.myLegalName)
+            rpcServer = RPCServer(rpcOps, NODE_USER, NODE_USER, locator, userService, config.myLegalName)
 
             fun checkVerifierCount() {
                 if (session.queueQuery(SimpleString(VERIFICATION_REQUESTS_QUEUE_NAME)).consumerCount == 0) {
@@ -210,6 +211,13 @@ class NodeMessagingClient(override val config: NodeConfiguration,
 
         resumeMessageRedelivery()
     }
+
+    /**
+     * If the message broker is running locally and [serverHostPort] specifies a public IP, the messaging client will
+     * fail to connect on nodes under a NAT with no loopback support. As the local message broker is listening on
+     * all interfaces it is safer to always use `localhost` instead.
+     */
+    private fun getBrokerAddress() = if (isServerLocal) HostAndPort.fromParts("localhost", serverHostPort.port) else serverHostPort
 
     /**
      * We make the consumer twice, once to filter for just network map messages, and then once that is complete, we close
@@ -269,12 +277,12 @@ class NodeMessagingClient(override val config: NodeConfiguration,
         return true
     }
 
-    private fun runPreNetworkMap() {
+    private fun runPreNetworkMap(serverControl: ActiveMQServerControl) {
         val consumer = state.locked {
             check(started) { "start must be called first" }
             check(!running) { "run can't be called twice" }
             running = true
-            rpcDispatcher!!.start(rpcConsumer!!, rpcNotificationConsumer!!, nodeExecutor)
+            rpcServer!!.start(serverControl)
             (verifierService as? OutOfProcessTransactionVerifierService)?.start(verificationResponseConsumer!!)
             p2pConsumer!!
         }
@@ -300,9 +308,9 @@ class NodeMessagingClient(override val config: NodeConfiguration,
      * we get our network map fetch response.  At that point the filtering consumer is closed and we proceed to the second loop and
      * consume all messages via a new consumer without a filter applied.
      */
-    fun run() {
+    fun run(serverControl: ActiveMQServerControl) {
         // Build the network map.
-        runPreNetworkMap()
+        runPreNetworkMap(serverControl)
         // Process everything else once we have the network map.
         runPostNetworkMap()
         shutdownLatch.countDown()
@@ -404,17 +412,13 @@ class NodeMessagingClient(override val config: NodeConfiguration,
         // Only first caller to gets running true to protect against double stop, which seems to happen in some integration tests.
         if (running) {
             state.locked {
-                rpcConsumer?.close()
-                rpcConsumer = null
-                rpcNotificationConsumer?.close()
-                rpcNotificationConsumer = null
                 producer?.close()
                 producer = null
                 // Ensure any trailing messages are committed to the journal
                 session!!.commit()
                 // Closing the factory closes all the sessions it produced as well.
-                clientFactory!!.close()
-                clientFactory = null
+                sessionFactory!!.close()
+                sessionFactory = null
             }
         }
     }
@@ -546,22 +550,6 @@ class NodeMessagingClient(override val config: NodeConfiguration,
             override fun toString() = "$topicSession#${String(data)}"
         }
     }
-
-    private fun createRPCDispatcher(ops: RPCOps, userService: RPCUserService, nodeLegalName: X500Name): RPCDispatcher =
-            object : RPCDispatcher(ops, userService, nodeLegalName) {
-                override fun send(data: SerializedBytes<*>, toAddress: String) {
-                    messagingExecutor.fetchFrom {
-                        state.locked {
-                            val msg = session!!.createMessage(false).apply {
-                                writeBodyBufferBytes(data.bytes)
-                                // Use the magic deduplication property built into Artemis as our message identity too
-                                putStringProperty(HDR_DUPLICATE_DETECTION_ID, SimpleString(UUID.randomUUID().toString()))
-                            }
-                            producer!!.send(toAddress, msg)
-                        }
-                    }
-                }
-            }
 
     private fun createOutOfProcessVerifierService(): TransactionVerifierService {
         return object : OutOfProcessTransactionVerifierService(monitoringService) {

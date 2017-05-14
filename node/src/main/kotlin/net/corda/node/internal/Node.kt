@@ -5,22 +5,26 @@ import com.google.common.net.HostAndPort
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
-import net.corda.core.div
 import net.corda.core.flatMap
 import net.corda.core.messaging.RPCOps
+import net.corda.core.minutes
 import net.corda.core.node.ServiceHub
 import net.corda.core.node.VersionInfo
 import net.corda.core.node.services.ServiceInfo
 import net.corda.core.node.services.ServiceType
 import net.corda.core.node.services.UniquenessProvider
+import net.corda.core.seconds
 import net.corda.core.success
 import net.corda.core.utilities.loggerFor
+import net.corda.core.utilities.trace
 import net.corda.node.printBasicNodeInfo
 import net.corda.node.serialization.NodeClock
 import net.corda.node.services.RPCUserService
 import net.corda.node.services.RPCUserServiceImpl
 import net.corda.node.services.config.FullNodeConfiguration
 import net.corda.node.services.messaging.ArtemisMessagingServer
+import net.corda.node.services.messaging.ArtemisMessagingServer.Companion.ipDetectRequestProperty
+import net.corda.node.services.messaging.ArtemisMessagingServer.Companion.ipDetectResponseProperty
 import net.corda.node.services.messaging.MessagingService
 import net.corda.node.services.messaging.NodeMessagingClient
 import net.corda.node.services.transactions.PersistentUniquenessProvider
@@ -29,13 +33,19 @@ import net.corda.node.services.transactions.RaftUniquenessProvider
 import net.corda.node.services.transactions.RaftValidatingNotaryService
 import net.corda.node.utilities.AddressUtils
 import net.corda.node.utilities.AffinityExecutor
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.IP_REQUEST_PREFIX
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.PEER_USER
 import net.corda.nodeapi.ArtemisMessagingComponent.NetworkMapAddress
+import net.corda.nodeapi.ArtemisTcpTransport
+import net.corda.nodeapi.ConnectionDirection
+import org.apache.activemq.artemis.api.core.ActiveMQNotConnectedException
+import org.apache.activemq.artemis.api.core.client.ActiveMQClient
+import org.apache.activemq.artemis.api.core.client.ClientMessage
 import org.bouncycastle.asn1.x500.X500Name
 import org.slf4j.Logger
-import java.io.RandomAccessFile
-import java.lang.management.ManagementFactory
-import java.nio.channels.FileLock
+import java.io.IOException
 import java.time.Clock
+import java.util.*
 import javax.management.ObjectName
 import kotlin.concurrent.thread
 
@@ -102,10 +112,6 @@ class Node(override val configuration: FullNodeConfiguration,
 
     var messageBroker: ArtemisMessagingServer? = null
 
-    // Avoid the lock being garbage collected. We don't really need to release it as the OS will do so for us
-    // when our process shuts down, but we try in stop() anyway just to be nice.
-    private var nodeFileLock: FileLock? = null
-
     private var shutdownThread: Thread? = null
 
     private lateinit var userService: RPCUserService
@@ -113,6 +119,7 @@ class Node(override val configuration: FullNodeConfiguration,
     override fun makeMessagingService(): MessagingService {
         userService = RPCUserServiceImpl(configuration.rpcUsers)
         val serverAddress = configuration.messagingServerAddress ?: makeLocalMessageBroker()
+
         val myIdentityOrNullIfNetworkMapService = if (networkMapAddress != null) obtainLegalIdentity().owningKey else null
         return NodeMessagingClient(
                 configuration,
@@ -122,7 +129,8 @@ class Node(override val configuration: FullNodeConfiguration,
                 serverThread,
                 database,
                 networkMapRegistrationFuture,
-                services.monitoringService)
+                services.monitoringService,
+                configuration.messagingServerAddress == null)
     }
 
     private fun makeLocalMessageBroker(): HostAndPort {
@@ -136,23 +144,66 @@ class Node(override val configuration: FullNodeConfiguration,
 
     /**
      * Checks whether the specified [host] is a public IP address or hostname. If not, tries to discover the current
-     * machine's public IP address to be used instead. Note that it will only work if the machine is internet-facing.
-     * If none found, outputs a warning message.
+     * machine's public IP address to be used instead. It first looks through the network interfaces, and if no public IP
+     * is found, asks the network map service to provide it.
      */
     private fun tryDetectIfNotPublicHost(host: String): String? {
         if (!AddressUtils.isPublic(host)) {
             val foundPublicIP = AddressUtils.tryDetectPublicIP()
+
             if (foundPublicIP == null) {
-                val message = "The specified messaging host \"$host\" is private, " +
-                        "this node will not be reachable by any other nodes outside the private network."
-                println("WARNING: $message")
-                log.warn(message)
+                networkMapAddress?.let { return discoverPublicHost(it.hostAndPort) }
             } else {
-                log.info("Detected public IP: $foundPublicIP. This will be used instead the provided \"$host\" as the advertised address.")
+                log.info("Detected public IP: ${foundPublicIP.hostAddress}. This will be used instead of the provided \"$host\" as the advertised address.")
+                return foundPublicIP.hostAddress
             }
-            return foundPublicIP?.hostAddress
         }
         return null
+    }
+
+    /**
+     * Asks the network map service to provide this node's public IP address:
+     * - Connects to the network map service's message broker and creates a special IP request queue with a custom
+     * request id. Marks the established session with the same request id.
+     * - On the server side a special post-queue-creation callback is fired. It finds the session matching the request id
+     * encoded in the queue name. It then extracts the remote IP from the session details and posts a message containing
+     * it back to the queue.
+     * - Once the message is received the session is closed and the queue deleted.
+     */
+    private fun discoverPublicHost(serverAddress: HostAndPort): String? {
+        log.trace { "Trying to detect public hostname through the Network Map Service at $serverAddress" }
+        val tcpTransport = ArtemisTcpTransport.tcpTransport(ConnectionDirection.Outbound(), serverAddress, configuration)
+        val locator = ActiveMQClient.createServerLocatorWithoutHA(tcpTransport).apply {
+            initialConnectAttempts = 5
+            retryInterval = 5.seconds.toMillis()
+            retryIntervalMultiplier = 1.5
+            maxRetryInterval = 3.minutes.toMillis()
+        }
+        val clientFactory = try {
+            locator.createSessionFactory()
+        } catch (e: ActiveMQNotConnectedException) {
+            throw IOException("Unable to connect to the Network Map Service at $serverAddress for IP address discovery", e)
+        }
+
+        val session = clientFactory.createSession(PEER_USER, PEER_USER, false, true, true, locator.isPreAcknowledge, ActiveMQClient.DEFAULT_ACK_BATCH_SIZE)
+        val requestId = UUID.randomUUID().toString()
+        session.addMetaData(ipDetectRequestProperty, requestId)
+        session.start()
+
+        val queueName = "$IP_REQUEST_PREFIX$requestId"
+        session.createQueue(queueName, queueName, false)
+
+        val consumer = session.createConsumer(queueName)
+        val artemisMessage: ClientMessage = consumer.receive(10.seconds.toMillis()) ?:
+                throw IOException("Did not receive a response from the Network Map Service at $serverAddress")
+        val publicHostAndPort = HostAndPort.fromString(artemisMessage.getStringProperty(ipDetectResponseProperty))
+        log.info("Detected public address: $publicHostAndPort")
+
+        consumer.close()
+        session.deleteQueue(queueName)
+        clientFactory.close()
+
+        return publicHostAndPort.host.removePrefix("/")
     }
 
     override fun startMessagingService(rpcOps: RPCOps) {
@@ -221,7 +272,6 @@ class Node(override val configuration: FullNodeConfiguration,
     val startupComplete: ListenableFuture<Unit> = SettableFuture.create()
 
     override fun start(): Node {
-        alreadyRunningNodeCheck()
         super.start()
 
         networkMapRegistrationFuture.success(serverThread) {
@@ -256,7 +306,7 @@ class Node(override val configuration: FullNodeConfiguration,
 
     /** Starts a blocking event loop for message dispatch. */
     fun run() {
-        (net as NodeMessagingClient).run()
+        (net as NodeMessagingClient).run(messageBroker!!.serverControl)
     }
 
     // TODO: Do we really need setup?
@@ -286,33 +336,7 @@ class Node(override val configuration: FullNodeConfiguration,
         // In particular this prevents premature shutdown of the Database by AbstractNode whilst the serverThread is active
         super.stop()
 
-        nodeFileLock!!.release()
         log.info("Shutdown complete")
-    }
-
-    private fun alreadyRunningNodeCheck() {
-        // Write out our process ID (which may or may not resemble a UNIX process id - to us it's just a string) to a
-        // file that we'll do our best to delete on exit. But if we don't, it'll be overwritten next time. If it already
-        // exists, we try to take the file lock first before replacing it and if that fails it means we're being started
-        // twice with the same directory: that's a user error and we should bail out.
-        val pidPath = configuration.baseDirectory / "process-id"
-        val file = pidPath.toFile()
-        if (!file.exists()) {
-            file.createNewFile()
-        }
-        file.deleteOnExit()
-        val f = RandomAccessFile(file, "rw")
-        val l = f.channel.tryLock()
-        if (l == null) {
-            log.error("It appears there is already a node running with the specified data directory ${configuration.baseDirectory}")
-            log.error("Shut that other node down and try again. It may have process ID ${file.readText()}")
-            System.exit(1)
-        }
-
-        nodeFileLock = l
-        val ourProcessID: String = ManagementFactory.getRuntimeMXBean().name.split("@")[0]
-        f.setLength(0)
-        f.write(ourProcessID.toByteArray())
     }
 }
 

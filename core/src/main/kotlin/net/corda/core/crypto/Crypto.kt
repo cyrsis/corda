@@ -1,18 +1,42 @@
 package net.corda.core.crypto
 
-import net.i2p.crypto.eddsa.EdDSAEngine
-import net.i2p.crypto.eddsa.EdDSAKey
-import net.i2p.crypto.eddsa.EdDSASecurityProvider
+import net.corda.core.random63BitValue
+import net.i2p.crypto.eddsa.*
+import net.i2p.crypto.eddsa.math.GroupElement
+import net.i2p.crypto.eddsa.spec.EdDSANamedCurveSpec
 import net.i2p.crypto.eddsa.spec.EdDSANamedCurveTable
+import net.i2p.crypto.eddsa.spec.EdDSAPrivateKeySpec
+import net.i2p.crypto.eddsa.spec.EdDSAPublicKeySpec
+import org.bouncycastle.asn1.ASN1EncodableVector
+import org.bouncycastle.asn1.ASN1ObjectIdentifier
+import org.bouncycastle.asn1.DERSequence
+import org.bouncycastle.asn1.bc.BCObjectIdentifiers
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x509.*
+import org.bouncycastle.asn1.x9.X9ObjectIdentifiers
+import org.bouncycastle.cert.bc.BcX509ExtensionUtils
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPrivateKey
+import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPublicKey
+import org.bouncycastle.jcajce.provider.util.AsymmetricKeyInfoConverter
 import org.bouncycastle.jce.ECNamedCurveTable
-import org.bouncycastle.jce.interfaces.ECKey
 import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.pkcs.PKCS10CertificationRequest
+import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder
 import org.bouncycastle.pqc.jcajce.provider.BouncyCastlePQCProvider
 import org.bouncycastle.pqc.jcajce.spec.SPHINCS256KeyGenParameterSpec
+import java.math.BigInteger
 import java.security.*
+import java.security.KeyFactory
+import java.security.KeyPairGenerator
+import java.security.cert.X509Certificate
 import java.security.spec.InvalidKeySpecException
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
+import java.util.*
 
 /**
  * This object controls and provides the available and supported signature schemes for Corda.
@@ -28,15 +52,6 @@ import java.security.spec.X509EncodedKeySpec
  * </ul>
  */
 object Crypto {
-    // This map is required to defend against users that forcibly call Security.addProvider / Security.removeProvider
-    // that could cause unexpected and suspicious behaviour.
-    // i.e. if someone removes a Provider and then he/she adds a new one with the same name.
-    // The val is private to avoid any harmful state changes.
-    private val providerMap = mapOf(
-            EdDSASecurityProvider.PROVIDER_NAME to EdDSASecurityProvider(),
-            BouncyCastleProvider.PROVIDER_NAME to BouncyCastleProvider(),
-            "BCPQC" to BouncyCastlePQCProvider()) // unfortunately, provider's name is not final in BouncyCastlePQCProvider, so we explicitly set it.
-
     /**
      * RSA_SHA256 signature scheme using SHA256 as hash algorithm and MGF1 (with SHA256) as mask generation function.
      * Note: Recommended key size >= 3072 bits.
@@ -44,6 +59,7 @@ object Crypto {
     val RSA_SHA256 = SignatureScheme(
             1,
             "RSA_SHA256",
+            PKCSObjectIdentifiers.id_RSASSA_PSS,
             BouncyCastleProvider.PROVIDER_NAME,
             "RSA",
             "SHA256WITHRSAANDMGF1",
@@ -56,6 +72,7 @@ object Crypto {
     val ECDSA_SECP256K1_SHA256 = SignatureScheme(
             2,
             "ECDSA_SECP256K1_SHA256",
+            X9ObjectIdentifiers.ecdsa_with_SHA256,
             BouncyCastleProvider.PROVIDER_NAME,
             "ECDSA",
             "SHA256withECDSA",
@@ -68,6 +85,7 @@ object Crypto {
     val ECDSA_SECP256R1_SHA256 = SignatureScheme(
             3,
             "ECDSA_SECP256R1_SHA256",
+            X9ObjectIdentifiers.ecdsa_with_SHA256,
             BouncyCastleProvider.PROVIDER_NAME,
             "ECDSA",
             "SHA256withECDSA",
@@ -80,7 +98,9 @@ object Crypto {
     val EDDSA_ED25519_SHA512 = SignatureScheme(
             4,
             "EDDSA_ED25519_SHA512",
-            EdDSASecurityProvider.PROVIDER_NAME,
+            ASN1ObjectIdentifier("1.3.101.112"),
+            // We added EdDSA to bouncy castle for certificate signing.
+            BouncyCastleProvider.PROVIDER_NAME,
             EdDSAKey.KEY_ALGORITHM,
             EdDSAEngine.SIGNATURE_ALGORITHM,
             EdDSANamedCurveTable.getByName("ED25519"),
@@ -95,6 +115,7 @@ object Crypto {
     val SPHINCS256_SHA256 = SignatureScheme(
             5,
             "SPHINCS-256_SHA512",
+            BCObjectIdentifiers.sphincs256_with_SHA512,
             "BCPQC",
             "SPHINCS256",
             "SHA512WITHSPHINCS256",
@@ -118,6 +139,25 @@ object Crypto {
             EDDSA_ED25519_SHA512,
             SPHINCS256_SHA256
     ).associateBy { it.schemeCodeName }
+
+    // This map is required to defend against users that forcibly call Security.addProvider / Security.removeProvider
+    // that could cause unexpected and suspicious behaviour.
+    // i.e. if someone removes a Provider and then he/she adds a new one with the same name.
+    // The val is private to avoid any harmful state changes.
+    private val providerMap: Map<String, Provider> = mapOf(
+            BouncyCastleProvider.PROVIDER_NAME to getBouncyCastleProvider(),
+            "BCPQC" to BouncyCastlePQCProvider()) // unfortunately, provider's name is not final in BouncyCastlePQCProvider, so we explicitly set it.
+
+    private fun getBouncyCastleProvider() = BouncyCastleProvider().apply {
+        putAll(EdDSASecurityProvider())
+        addKeyInfoConverter(EDDSA_ED25519_SHA512.signatureOID, KeyInfoConverter(EDDSA_ED25519_SHA512))
+    }
+
+    init {
+        // This registration is needed for reading back EdDSA key from java keystore.
+        // TODO: Find a way to make JKS work with bouncy castle provider or implement our own provide so we don't have to register bouncy castle provider.
+        Security.addProvider(getBouncyCastleProvider())
+    }
 
     /**
      * Factory pattern to retrieve the corresponding [SignatureScheme] based on the type of the [String] input.
@@ -146,19 +186,18 @@ object Crypto {
             if (algorithm == "SPHINCS-256") algorithm = "SPHINCS256" // because encoding may change algorithm name from SPHINCS256 to SPHINCS-256.
             if (algorithm == sig.algorithmName) {
                 // If more than one ECDSA schemes are supported, we should distinguish between them by checking their curve parameters.
-                // TODO: change 'continue' to 'break' if only one EdDSA curve will be used.
                 if (algorithm == "EdDSA") {
-                    if ((key as EdDSAKey).params == sig.algSpec) {
+                    if ((key is EdDSAPublicKey && publicKeyOnCurve(sig, key)) || (key is EdDSAPrivateKey && key.params == sig.algSpec)) {
                         return sig
-                    } else continue
+                    } else break // use continue if in the future we support more than one Edwards curves.
                 } else if (algorithm == "ECDSA") {
-                    if ((key as ECKey).parameters == sig.algSpec) {
+                    if ((key is BCECPublicKey && publicKeyOnCurve(sig, key)) || (key is BCECPrivateKey && key.parameters == sig.algSpec)) {
                         return sig
                     } else continue
                 } else return sig // it's either RSA_SHA256 or SPHINCS-256.
             }
         }
-        throw IllegalArgumentException("Unsupported key/algorithm for the private key: ${key.encoded.toBase58()}")
+        throw IllegalArgumentException("Unsupported key/algorithm for the key: ${key.encoded.toBase58()}")
     }
 
     /**
@@ -170,7 +209,7 @@ object Crypto {
      */
     @Throws(IllegalArgumentException::class)
     fun decodePrivateKey(encodedKey: ByteArray): PrivateKey {
-        for ((_, _, providerName, algorithmName) in supportedSignatureSchemes.values) {
+        for ((_, _, _, providerName, algorithmName) in supportedSignatureSchemes.values) {
             try {
                 return KeyFactory.getInstance(algorithmName, providerMap[providerName]).generatePrivate(PKCS8EncodedKeySpec(encodedKey))
             } catch (ikse: InvalidKeySpecException) {
@@ -201,6 +240,8 @@ object Crypto {
      */
     @Throws(IllegalArgumentException::class, InvalidKeySpecException::class)
     fun decodePrivateKey(signatureScheme: SignatureScheme, encodedKey: ByteArray): PrivateKey {
+        if (!isSupportedSignatureScheme(signatureScheme))
+            throw IllegalArgumentException("Unsupported key/algorithm for schemeCodeName: $signatureScheme.schemeCodeName")
         try {
             return KeyFactory.getInstance(signatureScheme.algorithmName, providerMap[signatureScheme.providerName]).generatePrivate(PKCS8EncodedKeySpec(encodedKey))
         } catch (ikse: InvalidKeySpecException) {
@@ -217,7 +258,7 @@ object Crypto {
      */
     @Throws(IllegalArgumentException::class)
     fun decodePublicKey(encodedKey: ByteArray): PublicKey {
-        for ((_, _, providerName, algorithmName) in supportedSignatureSchemes.values) {
+        for ((_, _, _, providerName, algorithmName) in supportedSignatureSchemes.values) {
             try {
                 return KeyFactory.getInstance(algorithmName, providerMap[providerName]).generatePublic(X509EncodedKeySpec(encodedKey))
             } catch (ikse: InvalidKeySpecException) {
@@ -250,6 +291,8 @@ object Crypto {
      */
     @Throws(IllegalArgumentException::class, InvalidKeySpecException::class)
     fun decodePublicKey(signatureScheme: SignatureScheme, encodedKey: ByteArray): PublicKey {
+        if (!isSupportedSignatureScheme(signatureScheme))
+            throw IllegalArgumentException("Unsupported key/algorithm for schemeCodeName: $signatureScheme.schemeCodeName")
         try {
             return KeyFactory.getInstance(signatureScheme.algorithmName, providerMap[signatureScheme.providerName]).generatePublic(X509EncodedKeySpec(encodedKey))
         } catch (ikse: InvalidKeySpecException) {
@@ -295,7 +338,7 @@ object Crypto {
      */
     @Throws(IllegalArgumentException::class, InvalidKeyException::class, SignatureException::class)
     fun doSign(signatureScheme: SignatureScheme, privateKey: PrivateKey, clearData: ByteArray): ByteArray {
-        if (!supportedSignatureSchemes.containsKey(signatureScheme.schemeCodeName))
+        if (!isSupportedSignatureScheme(signatureScheme))
             throw IllegalArgumentException("Unsupported key/algorithm for schemeCodeName: $signatureScheme.schemeCodeName")
         val signature = Signature.getInstance(signatureScheme.signatureName, providerMap[signatureScheme.providerName])
         if (clearData.isEmpty()) throw Exception("Signing of an empty array is not permitted!")
@@ -375,7 +418,7 @@ object Crypto {
      */
     @Throws(InvalidKeyException::class, SignatureException::class, IllegalArgumentException::class)
     fun doVerify(signatureScheme: SignatureScheme, publicKey: PublicKey, signatureData: ByteArray, clearData: ByteArray): Boolean {
-        if (!supportedSignatureSchemes.containsKey(signatureScheme.schemeCodeName))
+        if (!isSupportedSignatureScheme(signatureScheme))
             throw IllegalArgumentException("Unsupported key/algorithm for schemeCodeName: $signatureScheme.schemeCodeName")
         if (signatureData.isEmpty()) throw IllegalArgumentException("Signature data is empty!")
         if (clearData.isEmpty()) throw IllegalArgumentException("Clear data is empty, nothing to verify!")
@@ -438,7 +481,7 @@ object Crypto {
      */
     @Throws(SignatureException::class, IllegalArgumentException::class)
     fun isValid(signatureScheme: SignatureScheme, publicKey: PublicKey, signatureData: ByteArray, clearData: ByteArray): Boolean {
-        if (!supportedSignatureSchemes.containsKey(signatureScheme.schemeCodeName))
+        if (!isSupportedSignatureScheme(signatureScheme))
             throw IllegalArgumentException("Unsupported key/algorithm for schemeCodeName: $signatureScheme.schemeCodeName")
         val signature = Signature.getInstance(signatureScheme.signatureName, providerMap[signatureScheme.providerName])
         signature.initVerify(publicKey)
@@ -459,13 +502,14 @@ object Crypto {
     /**
      * Generate a [KeyPair] for the selected [SignatureScheme].
      * Note that RSA is the sole algorithm initialized specifically by its supported keySize.
-     * @param signatureScheme a supported [SignatureScheme], see [Crypto].
+     * @param signatureScheme a supported [SignatureScheme], see [Crypto], default to [DEFAULT_SIGNATURE_SCHEME] if not provided.
      * @return a new [KeyPair] for the requested [SignatureScheme].
      * @throws IllegalArgumentException if the requested signature scheme is not supported.
      */
     @Throws(IllegalArgumentException::class)
-    fun generateKeyPair(signatureScheme: SignatureScheme): KeyPair {
-        if (!supportedSignatureSchemes.containsKey(signatureScheme.schemeCodeName))
+    @JvmOverloads
+    fun generateKeyPair(signatureScheme: SignatureScheme = DEFAULT_SIGNATURE_SCHEME): KeyPair {
+        if (!isSupportedSignatureScheme(signatureScheme))
             throw IllegalArgumentException("Unsupported key/algorithm for schemeCodeName: $signatureScheme.schemeCodeName")
         val keyPairGenerator = KeyPairGenerator.getInstance(signatureScheme.algorithmName, providerMap[signatureScheme.providerName])
         if (signatureScheme.algSpec != null)
@@ -476,12 +520,109 @@ object Crypto {
     }
 
     /**
-     * Generate a [KeyPair] using the default signature scheme.
-     * @return a new [KeyPair].
+     * Returns a key pair derived from the given [BigInteger] entropy. This is useful for unit tests
+     * and other cases where you want hard-coded private keys.
+     * Currently, [EDDSA_ED25519_SHA512] is the sole scheme supported for this operation.
+     * @param signatureScheme a supported [SignatureScheme], see [Crypto].
+     * @param entropy a [BigInteger] value.
+     * @return a new [KeyPair] from an entropy input.
+     * @throws IllegalArgumentException if the requested signature scheme is not supported for KeyPair generation using an entropy input.
      */
-    fun generateKeyPair(): KeyPair = generateKeyPair(DEFAULT_SIGNATURE_SCHEME)
+    fun generateKeyPairFromEntropy(signatureScheme: SignatureScheme, entropy: BigInteger): KeyPair {
+        when (signatureScheme) {
+            EDDSA_ED25519_SHA512 -> return generateEdDSAKeyPairFromEntropy(entropy)
+        }
+        throw IllegalArgumentException("Unsupported signature scheme for fixed entropy-based key pair generation: $signatureScheme.schemeCodeName")
+    }
 
-    /** Check if the requested signature scheme is supported by the system. */
-    fun isSupportedSignatureScheme(schemeCodeName: String): Boolean = schemeCodeName in supportedSignatureSchemes
-    fun isSupportedSignatureScheme(signatureScheme: SignatureScheme): Boolean = signatureScheme.schemeCodeName in supportedSignatureSchemes
+    /**
+     * Returns a [DEFAULT_SIGNATURE_SCHEME] key pair derived from the given [BigInteger] entropy.
+     * @param entropy a [BigInteger] value.
+     * @return a new [KeyPair] from an entropy input.
+     */
+    fun generateKeyPairFromEntropy(entropy: BigInteger): KeyPair = generateKeyPairFromEntropy(DEFAULT_SIGNATURE_SCHEME, entropy)
+
+    // custom key pair generator from entropy.
+    private fun generateEdDSAKeyPairFromEntropy(entropy: BigInteger): KeyPair {
+        val params = EDDSA_ED25519_SHA512.algSpec as EdDSANamedCurveSpec
+        val bytes = entropy.toByteArray().copyOf(params.curve.field.getb() / 8) // need to pad the entropy to the valid seed length.
+        val priv = EdDSAPrivateKeySpec(bytes, params)
+        val pub = EdDSAPublicKeySpec(priv.a, params)
+        return KeyPair(EdDSAPublicKey(pub), EdDSAPrivateKey(priv))
+    }
+
+    /**
+     * Use bouncy castle utilities to sign completed X509 certificate with CA cert private key.
+     */
+    fun createCertificate(issuer: X500Name, issuerKeyPair: KeyPair,
+                          subject: X500Name, subjectPublicKey: PublicKey,
+                          keyUsage: KeyUsage, purposes: List<KeyPurposeId>,
+                          validityWindow: Pair<Date, Date>,
+                          pathLength: Int? = null, subjectAlternativeName: List<GeneralName>? = null): X509Certificate {
+
+        val signatureScheme = findSignatureScheme(issuerKeyPair.private)
+        val provider = providerMap[signatureScheme.providerName]
+        val serial = BigInteger.valueOf(random63BitValue())
+        val keyPurposes = DERSequence(ASN1EncodableVector().apply { purposes.forEach { add(it) } })
+
+        val builder = JcaX509v3CertificateBuilder(issuer, serial, validityWindow.first, validityWindow.second, subject, subjectPublicKey)
+                .addExtension(Extension.subjectKeyIdentifier, false, BcX509ExtensionUtils().createSubjectKeyIdentifier(SubjectPublicKeyInfo.getInstance(subjectPublicKey.encoded)))
+                .addExtension(Extension.basicConstraints, pathLength != null, if (pathLength == null) BasicConstraints(false) else BasicConstraints(pathLength))
+                .addExtension(Extension.keyUsage, false, keyUsage)
+                .addExtension(Extension.extendedKeyUsage, false, keyPurposes)
+
+        if (subjectAlternativeName != null && subjectAlternativeName.isNotEmpty()) {
+            builder.addExtension(Extension.subjectAlternativeName, false, DERSequence(subjectAlternativeName.toTypedArray()))
+        }
+        val signer = ContentSignerBuilder.build(signatureScheme, issuerKeyPair.private, provider)
+        return JcaX509CertificateConverter().setProvider(provider).getCertificate(builder.build(signer)).apply {
+            checkValidity(Date())
+            verify(issuerKeyPair.public, provider)
+        }
+    }
+
+    /**
+     * Create certificate signing request using provided information.
+     */
+    fun createCertificateSigningRequest(subject: X500Name, keyPair: KeyPair, signatureScheme: SignatureScheme): PKCS10CertificationRequest {
+        val signer = ContentSignerBuilder.build(signatureScheme, keyPair.private, providerMap[signatureScheme.providerName])
+        return JcaPKCS10CertificationRequestBuilder(subject, keyPair.public).build(signer)
+    }
+
+    private class KeyInfoConverter(val signatureScheme: SignatureScheme) : AsymmetricKeyInfoConverter {
+        override fun generatePublic(keyInfo: SubjectPublicKeyInfo?): PublicKey? = keyInfo?.let { decodePublicKey(signatureScheme, it.encoded) }
+        override fun generatePrivate(keyInfo: PrivateKeyInfo?): PrivateKey? = keyInfo?.let { decodePrivateKey(signatureScheme, it.encoded) }
+    }
+
+    /**
+     * Check if a point's coordinates are on the expected curve to avoid certain types of ECC attacks.
+     * Point-at-infinity is not permitted as well.
+     * @see <a href="https://safecurves.cr.yp.to/twist.html">Small subgroup and invalid-curve attacks</a> for a more descriptive explanation on such attacks.
+     * We use this function on [findSignatureScheme] for a [PublicKey]; currently used for signature verification only.
+     * Thus, as these attacks are mostly not relevant to signature verification, we should note that
+     * we're doing it out of an abundance of caution and specifically to proactively protect developers
+     * against using these points as part of a DH key agreement or for use cases as yet unimagined.
+     * This method currently applies to BouncyCastle's ECDSA (both R1 and K1 curves) and I2P's EdDSA (ed25519 curve).
+     * @param publicKey a [PublicKey], usually used to validate a signer's public key in on the Curve.
+     * @param signatureScheme a [SignatureScheme] object, retrieved from supported signature schemes, see [Crypto].
+     * @return true if the point lies on the curve or false if it doesn't.
+     * @throws IllegalArgumentException if the requested signature scheme or the key type is not supported.
+     */
+    @Throws(IllegalArgumentException::class)
+    fun publicKeyOnCurve(signatureScheme: SignatureScheme, publicKey: PublicKey): Boolean {
+        if (!isSupportedSignatureScheme(signatureScheme))
+            throw IllegalArgumentException("Unsupported signature scheme: $signatureScheme.schemeCodeName")
+        when (publicKey) {
+            is BCECPublicKey -> return (publicKey.parameters == signatureScheme.algSpec && !publicKey.q.isInfinity && publicKey.q.isValid)
+            is EdDSAPublicKey -> return (publicKey.params == signatureScheme.algSpec && !isEdDSAPointAtInfinity(publicKey) && publicKey.a.isOnCurve)
+            else -> throw IllegalArgumentException("Unsupported key type: ${publicKey::class}")
+        }
+    }
+
+    // return true if EdDSA publicKey is point at infinity.
+    // For EdDSA a custom function is required as it is not supported by the I2P implementation.
+    private fun isEdDSAPointAtInfinity(publicKey: EdDSAPublicKey) = publicKey.a.toP3() == (EDDSA_ED25519_SHA512.algSpec as EdDSANamedCurveSpec).curve.getZero(GroupElement.Representation.P3)
+
+    /** Check if the requested [SignatureScheme] is supported by the system. */
+    fun isSupportedSignatureScheme(signatureScheme: SignatureScheme): Boolean = supportedSignatureSchemes[signatureScheme.schemeCodeName] === signatureScheme
 }
